@@ -60,6 +60,10 @@ public:
         return latest_data_;
     }
 
+    // 调试用：返回天气摘要字符串（调用方无需在栈上放完整 WeatherData，
+    // 避免 -Wframe-larger-than=1536 在 HTTP handler 里报错）
+    std::string getWeatherSummary();
+
     // 设置 API 密钥和主机（从配置中读取）
     void setApiConfig(const char* key, const char* host);
 

@@ -1101,3 +1101,19 @@ bool WeatherManager::updateOpenMeteo() {
     }
     return true;
 }
+
+std::string WeatherManager::getWeatherSummary() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    char buf[384];
+    snprintf(buf, sizeof(buf),
+             "city=%s source=%s data=%s %s %s°C humidity=%s aqi=%s/%s wind=%s%s "
+             "pm25=%s sunrise=%s sunset=%s daily=%d",
+             city_.c_str(), city_source_.c_str(),
+             latest_data_.city.c_str(), latest_data_.text.c_str(), latest_data_.temp.c_str(),
+             latest_data_.humidity.c_str(), latest_data_.aqi.c_str(),
+             latest_data_.aqi_category.c_str(),
+             latest_data_.wind_dir.c_str(), latest_data_.wind_scale.c_str(),
+             latest_data_.pm25.c_str(), latest_data_.sunrise.c_str(),
+             latest_data_.sunset.c_str(), latest_data_.daily_count);
+    return std::string(buf);
+}

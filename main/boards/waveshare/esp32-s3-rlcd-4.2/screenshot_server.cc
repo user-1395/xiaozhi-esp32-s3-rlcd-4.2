@@ -300,9 +300,9 @@ static esp_err_t WeatherSetHandler(httpd_req_t *req) {
     if (!CheckAuth(req)) {
         return ESP_OK;
     }
-    char query[160] = {0};
-    char citybuf[64] = {0};
-    char admbuf[64] = {0};
+    char query[96] = {0};
+    char citybuf[40] = {0};
+    char admbuf[40] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
         httpd_query_key_value(query, "city", citybuf, sizeof(citybuf)) != ESP_OK) {
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -315,15 +315,9 @@ static esp_err_t WeatherSetHandler(httpd_req_t *req) {
     WeatherManager& wm = WeatherManager::getInstance();
     wm.SetCity(citybuf, admbuf);
     bool ok = wm.update();
-    WeatherData d = wm.getLatestData();
-    char out[320];
-    int n = snprintf(out, sizeof(out),
-        "city=%s source=%s ok=%d data=%s %s %s°C humidity=%s aqi=%s/%s wind=%s%s pm25=%s sunrise=%s sunset=%s\n",
-        wm.city().c_str(), wm.citySource().c_str(), ok ? 1 : 0,
-        d.city.c_str(), d.text.c_str(), d.temp.c_str(),
-        d.humidity.c_str(), d.aqi.c_str(), d.aqi_category.c_str(),
-        d.wind_dir.c_str(), d.wind_scale.c_str(),
-        d.pm25.c_str(), d.sunrise.c_str(), d.sunset.c_str());
+    std::string summary = wm.getWeatherSummary();
+    char out[160];
+    int n = snprintf(out, sizeof(out), "ok=%d %s\n", ok ? 1 : 0, summary.c_str());
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, out, n);
@@ -335,18 +329,10 @@ static esp_err_t WeatherDataHandler(httpd_req_t *req) {
         return ESP_OK;
     }
     WeatherManager& wm = WeatherManager::getInstance();
-    WeatherData d = wm.getLatestData();
-    char out[320];
-    int n = snprintf(out, sizeof(out),
-        "city=%s source=%s data=%s %s %s°C humidity=%s aqi=%s/%s wind=%s%s pm25=%s sunrise=%s sunset=%s daily=%d\n",
-        wm.city().c_str(), wm.citySource().c_str(),
-        d.city.c_str(), d.text.c_str(), d.temp.c_str(),
-        d.humidity.c_str(), d.aqi.c_str(), d.aqi_category.c_str(),
-        d.wind_dir.c_str(), d.wind_scale.c_str(),
-        d.pm25.c_str(), d.sunrise.c_str(), d.sunset.c_str(), d.daily_count);
+    std::string summary = wm.getWeatherSummary();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, out, n);
+    return httpd_resp_send(req, summary.c_str(), summary.length());
 }
 
 
