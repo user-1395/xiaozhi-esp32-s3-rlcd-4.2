@@ -24,7 +24,7 @@ jobs:
         run: |
           source $IDF_PATH/export.sh
           python scripts/release.py waveshare/esp32-s3-rlcd-4.2 \
-            --name waveshare-esp32-s3-rlcd-4.2 \
+            --name esp32-s3-rlcd-4.2 \
             --language zh-CN \
             --wake-word nihaoxiaozhi
 
