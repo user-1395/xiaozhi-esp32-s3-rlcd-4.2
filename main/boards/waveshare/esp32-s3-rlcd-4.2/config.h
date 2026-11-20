@@ -58,7 +58,7 @@
 // 设备优先从后端拿「实际所在地 + 和风 LocationID」，不再用出口 IP 判城市；
 // 后端不可用时回退下面的 WEATHER_CITY，IP 定位仅作最后兜底。后端位置由 config.yaml 的
 // plugins.get_weather.device_location 配置。
-#define WEATHER_BACKEND_GEO_URL "https://xiaozhiweb.hqgg.top:59826/xiaozhi/weather"
+#define WEATHER_BACKEND_GEO_URL ""
 
 // 待办 MCP 接入点（websocket JSON-RPC）。留空表示不启用，可在运行时通过
 // MCP 工具 self.todo.set_url 配置（持久化在 NVS namespace "todo", key "mcp_url"）。
