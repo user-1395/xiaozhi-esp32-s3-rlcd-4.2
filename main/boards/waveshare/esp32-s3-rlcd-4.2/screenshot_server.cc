@@ -20,6 +20,7 @@
 
 #include "custom_lcd_display.h"
 #include "application.h"
+#include "managers/weather_manager.h"
 #include <settings.h>   // P2 #14：从 NVS 读取可选鉴权 token
 
 static const char *TAG = "Screenshot";
@@ -294,6 +295,61 @@ static esp_err_t WeatherQueryHandler(httpd_req_t *req) {
 }
 
 
+// 调试端点：/weather_set?city=北京&adm= → 切换天气城市并立即刷新数据源
+static esp_err_t WeatherSetHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    char query[160] = {0};
+    char citybuf[64] = {0};
+    char admbuf[64] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "city", citybuf, sizeof(citybuf)) != ESP_OK) {
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_send(req, "missing city\n", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_query_key_value(query, "adm", admbuf, sizeof(admbuf));
+    UrlDecodeInPlace(citybuf);
+    UrlDecodeInPlace(admbuf);
+
+    WeatherManager& wm = WeatherManager::getInstance();
+    wm.SetCity(citybuf, admbuf);
+    bool ok = wm.update();
+    WeatherData d = wm.getLatestData();
+    char out[320];
+    int n = snprintf(out, sizeof(out),
+        "city=%s source=%s ok=%d data=%s %s %s°C humidity=%s aqi=%s/%s wind=%s%s pm25=%s sunrise=%s sunset=%s\n",
+        wm.city().c_str(), wm.citySource().c_str(), ok ? 1 : 0,
+        d.city.c_str(), d.text.c_str(), d.temp.c_str(),
+        d.humidity.c_str(), d.aqi.c_str(), d.aqi_category.c_str(),
+        d.wind_dir.c_str(), d.wind_scale.c_str(),
+        d.pm25.c_str(), d.sunrise.c_str(), d.sunset.c_str());
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+// 调试端点：/weather_data → 查看当前天气缓存（验证数据源是否跟随城市）
+static esp_err_t WeatherDataHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    WeatherManager& wm = WeatherManager::getInstance();
+    WeatherData d = wm.getLatestData();
+    char out[320];
+    int n = snprintf(out, sizeof(out),
+        "city=%s source=%s data=%s %s %s°C humidity=%s aqi=%s/%s wind=%s%s pm25=%s sunrise=%s sunset=%s daily=%d\n",
+        wm.city().c_str(), wm.citySource().c_str(),
+        d.city.c_str(), d.text.c_str(), d.temp.c_str(),
+        d.humidity.c_str(), d.aqi.c_str(), d.aqi_category.c_str(),
+        d.wind_dir.c_str(), d.wind_scale.c_str(),
+        d.pm25.c_str(), d.sunrise.c_str(), d.sunset.c_str(), d.daily_count);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+
 // 调试端点：/music_play?url=<encoded>&title=..&artist=.. → 模拟语音播放，验证自动切页/停留
 static esp_err_t MusicPlayHandler(httpd_req_t *req) {
     if (!CheckAuth(req)) {
@@ -403,6 +459,20 @@ static const httpd_uri_t kWeatherQueryUri = {
     .user_ctx = nullptr,
 };
 
+static const httpd_uri_t kWeatherSetUri = {
+    .uri = "/weather_set",
+    .method = HTTP_GET,
+    .handler = WeatherSetHandler,
+    .user_ctx = nullptr,
+};
+
+static const httpd_uri_t kWeatherDataUri = {
+    .uri = "/weather_data",
+    .method = HTTP_GET,
+    .handler = WeatherDataHandler,
+    .user_ctx = nullptr,
+};
+
 bool ScreenshotServerStart(CustomLcdDisplay *display) {
     if (s_server != nullptr) {
         return true;
@@ -426,8 +496,8 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 12;      // 调试端点已超过默认 8 个
-    config.stack_size = 8192;          // 截图逐像素遍历在同一线程内完成
+    config.max_uri_handlers = 14;      // 调试端点已超过默认 8 个
+    config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
         s_server = nullptr;
@@ -441,6 +511,8 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kPageUri);
     httpd_register_uri_handler(s_server, &kCountdownUri);
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);
+    httpd_register_uri_handler(s_server, &kWeatherSetUri);
+    httpd_register_uri_handler(s_server, &kWeatherDataUri);
     httpd_register_uri_handler(s_server, &kMusicPlayUri);
     httpd_register_uri_handler(s_server, &kMusicStopUri);
     httpd_register_uri_handler(s_server, &kMusicStateUri);

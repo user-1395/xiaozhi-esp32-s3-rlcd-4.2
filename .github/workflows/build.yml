@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   build:
-    name: Build RLCD 4.2 (zh-CN)
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.0.1
@@ -19,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build firmware
+      - name: Build RLCD 4.2
         shell: bash
         run: |
           source $IDF_PATH/export.sh
@@ -28,9 +27,9 @@ jobs:
             --language zh-CN \
             --wake-word nihaoxiaozhi
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rlcd42-merged
+          name: xiaozhi_esp32-s3-rlcd-4.2
           path: build/merged-binary.bin
           if-no-files-found: error

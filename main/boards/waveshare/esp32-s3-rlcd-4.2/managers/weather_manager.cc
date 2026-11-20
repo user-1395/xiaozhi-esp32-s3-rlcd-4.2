@@ -778,13 +778,76 @@ static const char* wmo_code_to_zh(int code) {
     }
 }
 
+// 免密钥天气源的城市参数表：当前城市 → itboy 城市代码 + Open-Meteo 经纬度。
+// 之前数据源写死常州，导致切换城市后仍抓常州数据；这里按 city_ 动态选择。
+struct CityGeoParam {
+    const char* name;
+    const char* itboy_code;
+    float lat;
+    float lon;
+};
+
+static const CityGeoParam kCityGeoParams[] = {
+    {"北京",   "101010100", 39.9042f, 116.4074f},
+    {"常州",   "101191101", 31.8107f, 119.9740f},
+    {"上海",   "101020100", 31.2304f, 121.4737f},
+    {"南京",   "101190100", 32.0603f, 118.7969f},
+    {"苏州",   "101190401", 31.2989f, 120.5853f},
+    {"无锡",   "101190201", 31.4912f, 120.3119f},
+    {"杭州",   "101210100", 30.2741f, 120.1551f},
+    {"宁波",   "101210401", 29.8683f, 121.5440f},
+    {"广州",   "101280100", 23.1291f, 113.2644f},
+    {"深圳",   "101280601", 22.5431f, 114.0579f},
+    {"成都",   "101270100", 30.5728f, 104.0668f},
+    {"重庆",   "101040100", 29.5630f, 106.5516f},
+    {"武汉",   "101200100", 30.5928f, 114.3055f},
+    {"西安",   "101110100", 34.3416f, 108.9398f},
+    {"天津",   "101030100", 39.3434f, 117.3616f},
+    {"长沙",   "101250100", 28.2282f, 112.9388f},
+    {"青岛",   "101120201", 36.0671f, 120.3826f},
+    {"济南",   "101120100", 36.6512f, 117.1201f},
+    {"郑州",   "101180100", 34.7466f, 113.6254f},
+    {"合肥",   "101220100", 31.8206f, 117.2272f},
+    {"厦门",   "101230201", 24.4798f, 118.0894f},
+    {"福州",   "101230100", 26.0745f, 119.2965f},
+    {"昆明",   "101290100", 25.0389f, 102.7183f},
+    {"沈阳",   "101070100", 41.8057f, 123.4315f},
+    {"大连",   "101070201", 38.9140f, 121.6147f},
+    {"哈尔滨", "101050100", 45.8038f, 126.5349f},
+    {"长春",   "101060100", 43.8171f, 125.3235f},
+    {"石家庄", "101090100", 38.0428f, 114.5149f},
+    {"太原",   "101080100", 37.8706f, 112.5489f},
+    {"南昌",   "101240100", 28.6829f, 115.8582f},
+    {"南宁",   "101300100", 22.8170f, 108.3665f},
+    {"海口",   "101310100", 20.0442f, 110.1999f},
+    {"兰州",   "101160100", 36.0611f, 103.8343f},
+    {"贵阳",   "101260100", 26.6470f, 106.6302f},
+};
+
+static const CityGeoParam* city_geo_param(const std::string& city) {
+    for (const auto& e : kCityGeoParams) {
+        if (city == e.name) return &e;
+    }
+    std::string norm = city;
+    if (norm.size() >= 3 && norm.compare(norm.size() - 3, 3, "市") == 0) {
+        norm.erase(norm.size() - 3);
+    }
+    for (const auto& e : kCityGeoParams) {
+        if (norm == e.name) return &e;
+    }
+    return nullptr;
+}
+
 // 免密钥天气源（主）：中国天气网数据接口（纯 HTTP，国内直连快，无需 Key）
 // 返回结构：{"cityInfo":{"city":"成都市"},"data":{"wendu":"12.8","forecast":[{"type":"小雨",...}]}}
 bool WeatherManager::updateItboy() {
     static WeatherData d;   // 放静态区：WeatherData 含 27 个 std::string，栈帧会超 1536 限制
     d = WeatherData();
-    // std::string 拼接避免固定缓冲截断
-    std::string url = std::string("http://t.weather.itboy.net/api/weather/city/") + WEATHER_CITY_CODE;
+    // std::string 拼接避免固定缓冲截断；城市代码按当前 city_ 动态解析
+    const CityGeoParam* gp = city_geo_param(city_);
+    const char* city_code = (gp != nullptr) ? gp->itboy_code : WEATHER_CITY_CODE;
+    std::string url = std::string("http://t.weather.itboy.net/api/weather/city/") + city_code;
+    ESP_LOGI(TAG, "中国天气网查询城市 %s (code=%s)", city_.c_str(), city_code);
 
     std::string body;
     if (!httpGetRaw(url, 8000, false, body)) {
@@ -851,7 +914,7 @@ bool WeatherManager::updateItboy() {
         }
         return "";
     };
-    d.humidity = it_str(data, "shidu");
+    d.humidity = DigitsOnly(it_str(data, "shidu"));  // itboy 返回 "62%"，UI 会再拼一个 "%"，这里只留数字
     d.aqi = it_str(today, "aqi");
     d.aqi_category = it_str(data, "quality");
     d.pm25 = it_str(data, "pm25");
@@ -899,16 +962,19 @@ bool WeatherManager::updateItboy() {
 bool WeatherManager::updateOpenMeteo() {
     static WeatherData d;   // 放静态区：WeatherData 含 27 个 std::string，栈帧会超 1536 限制
     d = WeatherData();
-    // std::string 拼接避免固定缓冲截断；经纬度先格式化到小缓冲再拼
+    // std::string 拼接避免固定缓冲截断；经纬度按当前 city_ 动态解析
+    const CityGeoParam* gp = city_geo_param(city_);
+    const float lat = (gp != nullptr) ? gp->lat : WEATHER_LAT;
+    const float lon = (gp != nullptr) ? gp->lon : WEATHER_LON;
     char coords[80];
-    snprintf(coords, sizeof(coords), "%.4f&longitude=%.4f", (double)WEATHER_LAT, (double)WEATHER_LON);
+    snprintf(coords, sizeof(coords), "%.4f&longitude=%.4f", (double)lat, (double)lon);
     std::string url = std::string("https://api.open-meteo.com/v1/forecast?latitude=") + coords +
                       "&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,"
                       "wind_speed_10m,wind_direction_10m,surface_pressure,visibility,pm2_5,us_aqi"
                       "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
                       "&forecast_days=4&timezone=Asia%2FShanghai";
 
-    ESP_LOGI(TAG, "使用 Open-Meteo 获取天气 (%.4f, %.4f)", (double)WEATHER_LAT, (double)WEATHER_LON);
+    ESP_LOGI(TAG, "使用 Open-Meteo 获取天气 %s (%.4f, %.4f)", city_.c_str(), (double)lat, (double)lon);
 
     std::string body;
     if (!httpGetRaw(url, 10000, true, body)) {
@@ -938,7 +1004,10 @@ bool WeatherManager::updateOpenMeteo() {
     char buf[32];
     snprintf(buf, sizeof(buf), "%.0f", temp->valuedouble);
 
-    d.city = WEATHER_CITY;
+    d.city = city_.empty() ? WEATHER_CITY : city_;
+    if (d.city.size() >= 3 && d.city.compare(d.city.size() - 3, 3, "市") == 0) {
+        d.city.erase(d.city.size() - 3);   // "北京市" → "北京"
+    }
     d.temp = buf;
     d.text = wmo_code_to_zh(code);
     d.update_time = "open-meteo";
