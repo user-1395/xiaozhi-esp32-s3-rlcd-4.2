@@ -791,9 +791,16 @@ bool WeatherManager::updateItboy() {
         return false;
     }
 
-    cJSON* root = cJSON_Parse(body.c_str());
+    // httpGetRaw 统一带 Accept-Encoding: gzip，itboy 可能返回 gzip 压缩体，
+    // 必须先解压再解析，否则 cJSON_Parse 失败并回退到字段不全的 Open-Meteo。
+    std::string decoded;
+    if (!gunzip_to_string(body, decoded)) {
+        decoded.swap(body);
+    }
+
+    cJSON* root = cJSON_Parse(decoded.c_str());
     if (root == nullptr) {
-        ESP_LOGW(TAG, "中国天气网响应解析失败 (head=%.80s)", body.c_str());
+        ESP_LOGW(TAG, "中国天气网响应解析失败 (head=%.80s)", decoded.c_str());
         return false;
     }
 
@@ -896,7 +903,10 @@ bool WeatherManager::updateOpenMeteo() {
     char coords[80];
     snprintf(coords, sizeof(coords), "%.4f&longitude=%.4f", (double)WEATHER_LAT, (double)WEATHER_LON);
     std::string url = std::string("https://api.open-meteo.com/v1/forecast?latitude=") + coords +
-                      "&current=temperature_2m,weather_code&timezone=Asia%2FShanghai";
+                      "&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,"
+                      "wind_speed_10m,wind_direction_10m,surface_pressure,visibility,pm2_5,us_aqi"
+                      "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
+                      "&forecast_days=4&timezone=Asia%2FShanghai";
 
     ESP_LOGI(TAG, "使用 Open-Meteo 获取天气 (%.4f, %.4f)", (double)WEATHER_LAT, (double)WEATHER_LON);
 
@@ -925,14 +935,92 @@ bool WeatherManager::updateOpenMeteo() {
     }
 
     const int code = (wcode && cJSON_IsNumber(wcode)) ? wcode->valueint : -1;
-    char temp_str[16];
-    snprintf(temp_str, sizeof(temp_str), "%.0f", temp->valuedouble);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.0f", temp->valuedouble);
 
     d.city = WEATHER_CITY;
-    d.temp = temp_str;
+    d.temp = buf;
     d.text = wmo_code_to_zh(code);
     d.update_time = "open-meteo";
     d.valid = true;
+
+    // 逐项填充扩展维度（取不到就留空，UI 会显示 "--"）
+    auto num = [](cJSON* obj, const char* key) -> cJSON* {
+        cJSON* v = obj ? cJSON_GetObjectItem(obj, key) : nullptr;
+        return (v && cJSON_IsNumber(v)) ? v : nullptr;
+    };
+    cJSON* feels = num(current, "apparent_temperature");
+    if (feels) { snprintf(buf, sizeof(buf), "%.0f", feels->valuedouble); d.feels_like = buf; }
+    cJSON* hum = num(current, "relative_humidity_2m");
+    if (hum) { snprintf(buf, sizeof(buf), "%.0f", hum->valuedouble); d.humidity = buf; }
+    cJSON* wspd = num(current, "wind_speed_10m");
+    cJSON* wdir = num(current, "wind_direction_10m");
+    if (wdir) {
+        const float deg = (float)wdir->valuedouble;
+        const char* dirs[8] = {"北", "东北", "东", "东南", "南", "西南", "西", "西北"};
+        d.wind_dir = dirs[(int)((deg + 22.5f) / 45.0f) % 8];
+        d.wind_dir += "风";
+    }
+    if (wspd) {
+        // km/h 转蒲福风级
+        const float kmh = (float)wspd->valuedouble;
+        const int scales[] = {0,1,2,3,4,5,6,7,8,9,10,11,12};
+        const float bounds[] = {1,6,12,20,29,39,50,62,75,89,103,118,999};
+        int lvl = 12;
+        for (int i = 0; i < 13; ++i) { if (kmh < bounds[i]) { lvl = scales[i]; break; } }
+        snprintf(buf, sizeof(buf), "%d", lvl); d.wind_scale = buf;
+    }
+    cJSON* pres = num(current, "surface_pressure");
+    if (pres) { snprintf(buf, sizeof(buf), "%.0f", pres->valuedouble); d.pressure = buf; }
+    cJSON* vis = num(current, "visibility");
+    if (vis) { snprintf(buf, sizeof(buf), "%.0f", vis->valuedouble / 1000.0f); d.vis = buf; }
+    cJSON* pm25 = num(current, "pm2_5");
+    if (pm25) { snprintf(buf, sizeof(buf), "%.0f", pm25->valuedouble); d.pm25 = buf; }
+    cJSON* aqi = num(current, "us_aqi");
+    if (aqi) {
+        snprintf(buf, sizeof(buf), "%.0f", aqi->valuedouble); d.aqi = buf;
+        const int a = (int)aqi->valuedouble;
+        d.aqi_category = a <= 50 ? "优" : (a <= 100 ? "良" : (a <= 150 ? "轻度污染" :
+                        (a <= 200 ? "中度污染" : (a <= 300 ? "重度污染" : "严重污染"))));
+    }
+
+    // 日出日落 + 未来 3 天预报（daily 各字段是数组，索引 0=今天）
+    cJSON* daily = cJSON_GetObjectItem(root, "daily");
+    // ISO 8601 "2026-11-21T06:33" 取第 11 位起 5 字符 = "06:33"
+    auto hhmm = [](cJSON* arr, int idx) -> std::string {
+        cJSON* it = arr ? cJSON_GetArrayItem(arr, idx) : nullptr;
+        if (!it || !cJSON_IsString(it) || !it->valuestring) return "";
+        const char* s = it->valuestring;
+        return strlen(s) >= 16 ? std::string(s + 11, 5) : "";
+    };
+    cJSON* sunrise_arr = daily ? cJSON_GetObjectItem(daily, "sunrise") : nullptr;
+    cJSON* sunset_arr = daily ? cJSON_GetObjectItem(daily, "sunset") : nullptr;
+    d.sunrise = hhmm(sunrise_arr, 0);
+    d.sunset = hhmm(sunset_arr, 0);
+
+    cJSON* dcodes = daily ? cJSON_GetObjectItem(daily, "weather_code") : nullptr;
+    cJSON* dmaxs = daily ? cJSON_GetObjectItem(daily, "temperature_2m_max") : nullptr;
+    cJSON* dmins = daily ? cJSON_GetObjectItem(daily, "temperature_2m_min") : nullptr;
+    int day_count = 0;
+    if (dmaxs && cJSON_IsArray(dmaxs)) day_count = cJSON_GetArraySize(dmaxs);
+    if (dcodes && cJSON_IsArray(dcodes) && (int)cJSON_GetArraySize(dcodes) < day_count)
+        day_count = cJSON_GetArraySize(dcodes);
+    if (day_count > 3) day_count = 3;
+    for (int i = 0; i < day_count; ++i) {
+        cJSON* dc = cJSON_GetArrayItem(dcodes, i);
+        cJSON* dhi = cJSON_GetArrayItem(dmaxs, i);
+        cJSON* dlo = cJSON_GetArrayItem(dmins, i);
+        if (dc && cJSON_IsNumber(dc)) d.daily[i].text_day = wmo_code_to_zh(dc->valueint);
+        if (dhi && cJSON_IsNumber(dhi)) {
+            snprintf(buf, sizeof(buf), "%.0f", dhi->valuedouble); d.daily[i].temp_max = buf;
+        }
+        if (dlo && cJSON_IsNumber(dlo)) {
+            snprintf(buf, sizeof(buf), "%.0f", dlo->valuedouble); d.daily[i].temp_min = buf;
+        }
+        d.daily[i].sunrise = hhmm(sunrise_arr, i);
+        d.daily[i].sunset = hhmm(sunset_arr, i);
+    }
+    d.daily_count = day_count;
 
     ESP_LOGI(TAG, "天气更新成功(Open-Meteo): %s %s %s°C (code=%d)",
              d.city.c_str(), d.text.c_str(),
