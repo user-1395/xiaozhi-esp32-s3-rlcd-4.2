@@ -23,6 +23,7 @@
 #include "ui_assets.h"
 #include "managers/weather_manager.h"
 #include "managers/todo_mcp_client.h"
+#include "managers/local_mcp_bridge.h"
 #include "screenshot_server.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -807,6 +808,56 @@ private:
             });
     }
 
+    // 路径 B：本地 MCP 桥接。云端 LLM 的工具调用经设备 HTTP POST 转发到
+    // 局域网 PC 上的 Python 服务，实现语音生成 Excel / 写文件 / 查电脑状态。
+    void RegisterLocalMcpTools() {
+        auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool("self.local.call",
+            "Call a tool on the user's local Windows PC to write files or check local machine status. "
+            "Use when the user asks to GENERATE/SAVE an Excel spreadsheet, table, report, note or document "
+            "ON THE LOCAL COMPUTER / PC / 电脑 / 本地, or asks about local disk space / computer status.\n"
+            "Available tools and their args (pass as a JSON object string in `args`):\n"
+            "- create_excel: {filename, title, headers:[str], rows:[[str]], sheet_name?} -> generates .xlsx\n"
+            "- write_note: {filename, content} -> writes a .md/.txt note\n"
+            "- list_generated_files: {} -> lists files on the PC\n"
+            "- read_text_file: {filename} -> reads a generated text file\n"
+            "- system_status: {} -> PC platform / CPU / free disk / time\n"
+            "Args:\n"
+            "  tool: one of the tool names above\n"
+            "  args: JSON object string with that tool's parameters, e.g. "
+            "{\"filename\":\"本周待办.xlsx\",\"title\":\"本周待办\",\"headers\":[\"时间\",\"事项\"],\"rows\":[[\"周一\",\"周会\"]]}",
+            PropertyList({
+                Property("tool", kPropertyTypeString),
+                Property("args", kPropertyTypeString)
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                auto tool = properties["tool"].value<std::string>();
+                auto args = properties["args"].value<std::string>();
+                std::string out;
+                bool ok = LocalMcpBridge::GetInstance().Call(tool, args, out);
+                if (!ok) return std::string("本地工具调用失败：") + out;
+                return out;
+            });
+
+        mcp_server.AddTool("self.local.set_url",
+            "Set the HTTP address of the local PC MCP bridge service. "
+            "Use only when the user asks to change the local service address.\n"
+            "Args:\n"
+            "  url: http URL, e.g. http://192.168.1.11:8123",
+            PropertyList({
+                Property("url", kPropertyTypeString)
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                auto url = properties["url"].value<std::string>();
+                if (url.rfind("http://", 0) != 0) {
+                    return std::string("地址必须以 http:// 开头");
+                }
+                LocalMcpBridge::GetInstance().SetUrl(url);
+                return std::string("本地服务地址已保存：") + url;
+            });
+    }
+
     // P2 #6：按域拆分的工具注册入口；InitializeTools 仅负责依次调用。
     void InitializeTools() {
         RegisterSystemTools();
@@ -815,6 +866,7 @@ private:
         RegisterDisplayTools();
         RegisterMemoTools();
         RegisterTodoTools();
+        RegisterLocalMcpTools();
     }
 
     void InitializeLcdDisplay() {

@@ -65,6 +65,11 @@
 // 例：wss://example.com:59826/mcp_endpoint/call/?token=xxx
 #define MCP_TODO_URL ""
 
+// 本地 MCP 桥接地址（路径 B）。云端 LLM 的工具调用经设备转发到这台 PC 上的
+// Python 服务，实现"语音生成 Excel 存本地"。默认指向固定 IP 192.168.1.11。
+// 运行时可用 MCP 工具 self.local.set_url 热改（持久化在 NVS namespace "local_mcp"）。
+#define LOCAL_MCP_URL "http://192.168.1.11:8123"
+
 // ===== 电池检测 =====
 // 采样：ADC1 通道 3（ESP32-S3 上 ADC1_CH3 = GPIO4），12 dB 衰减、12 bit、硬件曲线拟合校准。
 // 待补充（需原理图/实测确认）：采样引脚、分压比、是否有充电 IC 的 STAT 引脚接到 SoC。
