@@ -104,6 +104,8 @@ private:
     std::string city_;
     std::string loc_id_;    // 和风天气 LocationID（geo 查询结果，缓存在 NVS）
     std::string loc_name_;  // 和风返回的城市名（用于显示）
+    float loc_lat_ = 0.0f;  // 和风 geo 返回的经纬度（新版空气质量接口按经纬度查询）
+    float loc_lon_ = 0.0f;
     std::string adm_;       // 上级行政区划（手动配置或 geo 返回的 adm1），同名城市消歧用
     std::string city_source_ = "默认";   // 城市来源描述
     std::string ip_cache_city_;          // NVS 缓存的上次 IP 定位城市

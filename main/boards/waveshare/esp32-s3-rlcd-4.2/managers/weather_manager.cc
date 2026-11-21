@@ -240,6 +240,13 @@ void WeatherManager::loadConfigFromNvs() {
         loc_id_ = loc_id;
         loc_name_ = loc_name;
     }
+    // 和风 geo 缓存的经纬度：新版空气质量接口按经纬度查询，避免每次开机重新 geo
+    std::string loc_coord = settings.GetString("loc_coord");
+    float cla = 0.0f, clo = 0.0f;
+    if (sscanf(loc_coord.c_str(), "%f,%f", &cla, &clo) == 2) {
+        loc_lat_ = cla;
+        loc_lon_ = clo;
+    }
     // 后端地址缓存：后端是权威来源，开机先用上次结果，网络就绪后 LocateFromBackend() 刷新。
     backend_cache_city_ = settings.GetString("backend_city");
     backend_cache_adm_ = settings.GetString("backend_adm");
@@ -498,6 +505,11 @@ std::string WeatherManager::ResolveLocationId() {
                     }
                     loc_id_ = id->valuestring;
                     loc_name_ = display;
+                    // 保存 geo 返回的经纬度：新版空气质量接口 /airquality/v1/current/{lat}/{lon} 需要
+                    cJSON* jlat = cJSON_GetObjectItem(first, "lat");
+                    cJSON* jlon = cJSON_GetObjectItem(first, "lon");
+                    if (jlat && cJSON_IsString(jlat)) loc_lat_ = (float)atof(jlat->valuestring);
+                    if (jlon && cJSON_IsString(jlon)) loc_lon_ = (float)atof(jlon->valuestring);
                     cJSON* adm1 = cJSON_GetObjectItem(first, "adm1");
                     if (adm1 && cJSON_IsString(adm1) && adm1->valuestring[0] != 0) {
                         adm_ = adm1->valuestring;
@@ -509,6 +521,9 @@ std::string WeatherManager::ResolveLocationId() {
                     Settings wr("weather", true);
                     wr.SetString("loc_id", loc_id_);
                     wr.SetString("loc_name", loc_name_);
+                    char coordbuf[40];
+                    snprintf(coordbuf, sizeof(coordbuf), "%.4f,%.4f", (double)loc_lat_, (double)loc_lon_);
+                    wr.SetString("loc_coord", coordbuf);
                     ESP_LOGI(TAG, "和风 geo 定位成功: %s (%s, 上级=%s)",
                              loc_name_.c_str(), loc_id_.c_str(), adm_.c_str());
                     ok = true;
@@ -602,28 +617,49 @@ bool WeatherManager::updateQWeather() {
     d.city = loc_name_.empty() ? city_ : loc_name_;
     cJSON_Delete(root);
 
-    // 2) 空气质量
-    //    先清空旧值：本子请求失败时不保留上一轮 aqi，避免新旧混显
+    // 2) 空气质量（新版接口：旧 /v7/air/now 已于 2026-06 停服）
+    //    GET /airquality/v1/current/{lat}/{lon}，从 indexes 里取中国标准 cn-mee，
+    //    从 pollutants 里取 pm2p5。先清空旧值，失败不保留上一轮数据。
     d.aqi.clear();
     d.aqi_category.clear();
     d.pm25.clear();
-    url = "https://" + api_host_ + "/v7/air/now?location=" + loc + "&lang=zh&key=" + api_key_;
-    if (httpGetJson(url, body, 12000)) {
-        cJSON* aroot = cJSON_Parse(body.c_str());
-        if (aroot) {
-            cJSON* anow = cJSON_GetObjectItem(aroot, "now");
-            if (anow) {
-                d.aqi = str_of(anow, "aqi");
-                d.aqi_category = str_of(anow, "category");
-                d.pm25 = str_of(anow, "pm2p5");
+    if (loc_lat_ != 0.0f && loc_lon_ != 0.0f) {
+        char aqicoord[48];
+        snprintf(aqicoord, sizeof(aqicoord), "%.4f/%.4f", (double)loc_lat_, (double)loc_lon_);
+        url = "https://" + api_host_ + "/airquality/v1/current/" + aqicoord + "?lang=zh&key=" + api_key_;
+        if (httpGetJson(url, body, 12000)) {
+            cJSON* aroot = cJSON_Parse(body.c_str());
+            if (aroot) {
+                cJSON* indexes = cJSON_GetObjectItem(aroot, "indexes");
+                if (indexes && cJSON_IsArray(indexes)) {
+                    int ic = cJSON_GetArraySize(indexes);
+                    for (int i = 0; i < ic; ++i) {
+                        cJSON* ix = cJSON_GetArrayItem(indexes, i);
+                        std::string icode = str_of(ix, "code");
+                        if (icode == "cn-mee") {   // 中国国标 AQI，与手机天气口径一致
+                            d.aqi = str_of(ix, "aqiDisplay");
+                            if (d.aqi.empty()) d.aqi = str_of(ix, "aqi");
+                            d.aqi_category = str_of(ix, "category");
+                            break;
+                        }
+                    }
+                }
+                cJSON* pollutants = cJSON_GetObjectItem(aroot, "pollutants");
+                if (pollutants && cJSON_IsArray(pollutants)) {
+                    int pc = cJSON_GetArraySize(pollutants);
+                    for (int i = 0; i < pc; ++i) {
+                        cJSON* p = cJSON_GetArrayItem(pollutants, i);
+                        if (str_of(p, "code") == "pm2p5") {
+                            cJSON* conc = cJSON_GetObjectItem(p, "concentration");
+                            d.pm25 = str_of(conc, "value");
+                            break;
+                        }
+                    }
+                }
+                cJSON_Delete(aroot);
             } else {
-                cJSON* acode = cJSON_GetObjectItem(aroot, "code");
-                ESP_LOGW(TAG, "和风空气质量无 now 字段 code=%s head=%.60s",
-                         (acode && cJSON_IsString(acode)) ? acode->valuestring : "null", body.c_str());
+                ESP_LOGW(TAG, "和风空气质量解析失败 head=%.80s", body.c_str());
             }
-            cJSON_Delete(aroot);
-        } else {
-            ESP_LOGW(TAG, "和风空气质量解析失败 head=%.80s", body.c_str());
         }
     }
 
@@ -667,29 +703,9 @@ bool WeatherManager::updateQWeather() {
         }
     }
 
-    // 4) 预警（只取第一条：类型 + 颜色等级）
+    // 4) 预警：旧 /v7/warning/now 已于 2026-10 停服（返回 403 Deprecated）。
+    //    预警非关键维度，留空即可，避免每次请求白等超时。新版预警接口待固件后续升级再接。
     d.warning.clear();
-    url = "https://" + api_host_ + "/v7/warning/now?location=" + loc + "&lang=zh&key=" + api_key_;
-    if (httpGetJson(url, body, 12000)) {
-        cJSON* wroot = cJSON_Parse(body.c_str());
-        if (wroot) {
-            cJSON* arr = cJSON_GetObjectItem(wroot, "warning");
-            if (arr && cJSON_GetArraySize(arr) > 0) {
-                cJSON* w0 = cJSON_GetArrayItem(arr, 0);
-                // 和风返回英文颜色名（Blue/Yellow/Orange/Red/White/Black），转成中文等级
-                const std::string color = str_of(w0, "severityColor");
-                const char* color_zh = "";
-                if (color == "White")       color_zh = "白色";
-                else if (color == "Blue")   color_zh = "蓝色";
-                else if (color == "Yellow") color_zh = "黄色";
-                else if (color == "Orange") color_zh = "橙色";
-                else if (color == "Red")    color_zh = "红色";
-                else if (color == "Black")  color_zh = "黑色";
-                d.warning = str_of(w0, "typeName") + color_zh;
-            }
-            cJSON_Delete(wroot);
-        }
-    }
 
     d.valid = true;
     ESP_LOGI(TAG, "天气更新成功(和风): %s %s %s°C 体感%s 湿度%s%% %s%s级 AQI %s %s 日出%s 日落%s%s%s",

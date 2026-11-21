@@ -459,6 +459,48 @@ static const httpd_uri_t kWeatherDataUri = {
     .user_ctx = nullptr,
 };
 
+// 调试端点：/weather_api_set?host=<api_host>&key=<api_key> → 把和风凭证写进 NVS（热配置，无需重刷固件）
+// 写完后清 LocationID 缓存并立即 update() 验证；凭证只在设备 NVS，不进源码/仓库
+static esp_err_t WeatherApiSetHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    char query[384] = {0};
+    char hostbuf[128] = {0};
+    char keybuf[128] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "host", hostbuf, sizeof(hostbuf)) != ESP_OK ||
+        httpd_query_key_value(query, "key", keybuf, sizeof(keybuf)) != ESP_OK) {
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_send(req, "missing host or key\n", HTTPD_RESP_USE_STRLEN);
+    }
+    UrlDecodeInPlace(hostbuf);
+    UrlDecodeInPlace(keybuf);
+    {
+        Settings wr("weather", true);
+        wr.SetString("api_host", hostbuf);
+        wr.SetString("api_key", keybuf);
+        wr.SetString("loc_id", "");   // 换凭证后强制重新 geo 定位
+        wr.SetString("loc_name", "");
+        wr.SetString("loc_coord", "");
+    }
+    WeatherManager& wm = WeatherManager::getInstance();
+    wm.loadConfigFromNvs();            // 让新凭证立即生效
+    bool ok = wm.update();
+    char out[96];
+    int n = snprintf(out, sizeof(out), "ok=%d qw=%s\n", ok ? 1 : 0, wm.hasQWeather() ? "yes" : "no");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+static const httpd_uri_t kWeatherApiSetUri = {
+    .uri = "/weather_api_set",
+    .method = HTTP_GET,
+    .handler = WeatherApiSetHandler,
+    .user_ctx = nullptr,
+};
+
 bool ScreenshotServerStart(CustomLcdDisplay *display) {
     if (s_server != nullptr) {
         return true;
@@ -482,7 +524,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 14;      // 调试端点已超过默认 8 个
+    config.max_uri_handlers = 15;      // 调试端点已超过默认 8 个
     config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
@@ -499,6 +541,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);
     httpd_register_uri_handler(s_server, &kWeatherSetUri);
     httpd_register_uri_handler(s_server, &kWeatherDataUri);
+    httpd_register_uri_handler(s_server, &kWeatherApiSetUri);
     httpd_register_uri_handler(s_server, &kMusicPlayUri);
     httpd_register_uri_handler(s_server, &kMusicStopUri);
     httpd_register_uri_handler(s_server, &kMusicStateUri);
