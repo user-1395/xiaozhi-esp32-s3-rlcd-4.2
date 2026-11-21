@@ -58,16 +58,23 @@ void McpServer::AddCommonTools() {
             });
 
     AddTool("self.audio_speaker.set_volume",
-            "Set the volume of the audio speaker. If the current volume is unknown, you must call "
-            "`self.get_device_status` tool first and then call this tool.",
+            "Set the speaker volume (0-100) of the device. The value is saved permanently as the "
+            "wake-up volume and will be used automatically at the next boot/wake — no need to set it again. "
+            "Call this whenever the user asks to adjust volume in ANY wording, for example: "
+            "“音量调大/调小/调到50/设置为60/太大声/听不见/静音/恢复音量”, "
+            "“turn the volume up/down”, “set volume to 50”, “too loud”, “can't hear you”, “mute”. "
+            "Setting a value greater than 0 also unmutes the speaker; setting 0 mutes it. "
+            "You do NOT need to call any other tool first — just call this tool directly with the number.",
             PropertyList({Property("volume", kPropertyTypeInteger, 0, 100)}),
             [&board](const PropertyList& properties) -> ReturnValue {
                 auto codec = board.GetAudioCodec();
                 int volume = properties["volume"].value<int>();
-                codec->SetOutputVolume(volume);
-                // 音量为 0 视为静音；调大音量自动解除开机静音
-                codec->SetMute(volume == 0);
-                return true;
+                if (volume < 0) volume = 0;
+                if (volume > 100) volume = 100;
+                codec->SetOutputVolume(volume);   // 写入硬件 + 持久化到 NVS(audio/output_volume)
+                codec->SetMute(volume == 0);      // >0 解除静音；0 静音
+                return std::string("音量已设为 ") + std::to_string(volume)
+                     + "，已保存为唤醒音量，下次开机自动沿用";
             });
 
     AddTool("self.music.play_url",

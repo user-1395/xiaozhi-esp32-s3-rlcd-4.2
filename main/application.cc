@@ -156,11 +156,15 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
-    // 开机默认静音：只关硬件输出，不覆盖用户音量设置；用户调音量或调用 MCP 工具即可解除
-    if (codec != nullptr) {
+    // 唤醒音量：开机按 NVS 保存的音量直接出声，不再无条件静音。
+    // 小智通过 self.audio_speaker.set_volume 设置音量时会写入 NVS，下次开机/唤醒自动沿用。
+    // 仅当音量 <= 0 时才静音（正常启动时 AudioCodec::Start() 已把 0 兜底为 10）。
+    if (codec != nullptr && codec->output_volume() <= 0) {
         codec->SetMute(true);
     }
-    ESP_LOGI(TAG, "After board/audio init (startup muted)");
+    ESP_LOGI(TAG, "After board/audio init (wake volume=%d, muted=%d)",
+             codec != nullptr ? codec->output_volume() : -1,
+             codec != nullptr ? (codec->muted() ? 1 : 0) : -1);
     SystemInfo::PrintHeapStats();
 
     AudioServiceCallbacks callbacks;
