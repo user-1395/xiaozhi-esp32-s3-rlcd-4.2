@@ -21,6 +21,7 @@
 #include "custom_lcd_display.h"
 #include "application.h"
 #include "managers/weather_manager.h"
+#include "managers/local_mcp_bridge.h"
 #include <settings.h>   // P2 #14：从 NVS 读取可选鉴权 token
 
 static const char *TAG = "Screenshot";
@@ -501,6 +502,38 @@ static const httpd_uri_t kWeatherApiSetUri = {
     .user_ctx = nullptr,
 };
 
+// 调试端点：直接触发本地 MCP 桥接，验证「设备 → PC」链路。
+// GET /local_call?tool=create_excel&args=<urlencoded JSON>
+static esp_err_t LocalCallHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    char query[1024] = {0};
+    char toolbuf[64] = {0};
+    char argsbuf[768] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "tool", toolbuf, sizeof(toolbuf)) != ESP_OK ||
+        httpd_query_key_value(query, "args", argsbuf, sizeof(argsbuf)) != ESP_OK) {
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_send(req, "missing tool or args\n", HTTPD_RESP_USE_STRLEN);
+    }
+    UrlDecodeInPlace(toolbuf);
+    UrlDecodeInPlace(argsbuf);
+    std::string out;
+    bool ok = LocalMcpBridge::GetInstance().Call(toolbuf, argsbuf, out);
+    std::string resp = std::string("ok=") + (ok ? "1" : "0") + "\n" + out + "\n";
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, resp.c_str(), resp.size());
+}
+
+static const httpd_uri_t kLocalCallUri = {
+    .uri = "/local_call",
+    .method = HTTP_GET,
+    .handler = LocalCallHandler,
+    .user_ctx = nullptr,
+};
+
 bool ScreenshotServerStart(CustomLcdDisplay *display) {
     if (s_server != nullptr) {
         return true;
@@ -524,7 +557,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 15;      // 调试端点已超过默认 8 个
+    config.max_uri_handlers = 16;      // 调试端点已超过默认 8 个
     config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
@@ -545,6 +578,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kMusicPlayUri);
     httpd_register_uri_handler(s_server, &kMusicStopUri);
     httpd_register_uri_handler(s_server, &kMusicStateUri);
+    httpd_register_uri_handler(s_server, &kLocalCallUri);
     ESP_LOGI(TAG, "截图服务已启动: http://<设备IP>:%d/shot.bmp", kShotPort);
     return true;
 }
