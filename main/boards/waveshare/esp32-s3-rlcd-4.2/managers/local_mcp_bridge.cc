@@ -1,6 +1,6 @@
 #include "local_mcp_bridge.h"
-#include "config.h"
-#include "settings.h"
+#include "../config.h"
+#include <settings.h>
 
 #include <esp_http_client.h>
 #include <esp_log.h>
