@@ -38,10 +38,10 @@
 #define QWEATHER_KEY  ""   // 例：32 位十六进制 API KEY
 
 // 免密钥源参数（和风不可用时的兜底）
-#define WEATHER_LAT   39.9042f    // 纬度（默认北京；切换城市时按城市参数表动态取）
-#define WEATHER_LON   116.4074f   // 经度
-#define WEATHER_CITY  "北京"       // 查询/显示的城市名（和风 geo 定位也用它）
-#define WEATHER_CITY_CODE "101010100"
+#define WEATHER_LAT   40.0680f    // 纬度（默认昌平回龙观；切换城市时按城市参数表动态取）
+#define WEATHER_LON   116.3430f   // 经度
+#define WEATHER_CITY  "昌平"       // 查询/显示的城市名（和风 geo 定位也用它）
+#define WEATHER_CITY_CODE "101010700"
 
 // IP 定位（ip-api.com 免费接口，HTTP，45 次/分钟）：仅作最后兜底。
 // 注意：IP 定位得到的是「出口 IP」的注册地，设备在 Windows 热点/运营商 NAT 后面时常常与真实

@@ -139,8 +139,8 @@ private:
     // 无和风 Key 时的免密钥天气源：主用中国天气网(数据接口)，备用 Open-Meteo
     bool updateItboy();
     bool updateOpenMeteo();
-    // 用 Open-Meteo 覆盖 itboy 的偏旧温度：实时（温度/体感/湿度）+ 三天预报高低温。
-    // itboy 的 wendu 常停留在清晨旧值（如 0.0°C），预报温度也偏高，与实况偏差大；
-    // 其余维度（天气文字/风力/日出日落/AQI/PM2.5）保留 itboy 完整数据，避免 US AQI 标准差异。
+    // 用 Open-Meteo 覆盖 itboy 的清晨脏实时值（温度/体感/湿度）。itboy 的 wendu 常停留在
+    // 清晨旧值（如 0.0°C / -6.7°C），与实况偏差大；三天预报保留 itboy——用户手机天气
+    // （小米/华为，中国天气网系）与 itboy 同源，口径一致。天气文字/风力/AQI 等均保留 itboy。
     bool overlayRealtimeFromOpenMeteo();
 };
