@@ -746,6 +746,10 @@ bool WeatherManager::update() {
     }
     // 2) 免密钥兜底：中国天气网 -> Open-Meteo
     if (updateItboy()) {
+        // itboy 的 wendu 字段常停留在清晨旧值（曾观测到 0.0°C 而同刻实况 3.5°C），
+        // 用 Open-Meteo 覆盖温度/体感/湿度三项实时值，其余维度（AQI/风力/日出日落/预报）
+        // 保留 itboy 数据，避免 US AQI 与国内 AQI 标准不一致。覆盖失败时保留 itboy 原值。
+        overlayRealtimeFromOpenMeteo();
         return true;
     }
     return updateOpenMeteo();
@@ -1099,6 +1103,67 @@ bool WeatherManager::updateOpenMeteo() {
         std::lock_guard<std::mutex> lk(mutex_);
         latest_data_ = d;
     }
+    return true;
+}
+
+// 用 Open-Meteo 当前实况覆盖温度/体感/湿度：itboy 的 wendu 常停留在清晨旧值，
+// 只覆盖这三项，其余维度保留 itboy（AQI/风力/日出日落/预报），避免 US AQI 标准差异。
+// 任何一步失败都不改动已有数据（静默回退到 itboy 原值）。
+bool WeatherManager::overlayRealtimeFromOpenMeteo() {
+    const CityGeoParam* gp = city_geo_param(city_);
+    const float lat = (gp != nullptr) ? gp->lat : WEATHER_LAT;
+    const float lon = (gp != nullptr) ? gp->lon : WEATHER_LON;
+    char coords[64];
+    snprintf(coords, sizeof(coords), "%.4f&longitude=%.4f", (double)lat, (double)lon);
+    // 只取三项实时值，无 daily，响应体小、解析快
+    std::string url = std::string("https://api.open-meteo.com/v1/forecast?latitude=") + coords +
+                      "&current=temperature_2m,apparent_temperature,relative_humidity_2m"
+                      "&timezone=Asia%2FShanghai";
+
+    std::string body;
+    if (!httpGetRaw(url, 10000, true, body)) {
+        ESP_LOGW(TAG, "Open-Meteo 实时覆盖请求失败，沿用 itboy 温度");
+        return false;
+    }
+    std::string json;
+    if (!gunzip_to_string(body, json)) {
+        json.swap(body);
+    }
+    cJSON* root = cJSON_Parse(json.c_str());
+    if (root == nullptr) {
+        return false;
+    }
+    cJSON* current = cJSON_GetObjectItem(root, "current");
+    cJSON* t = current ? cJSON_GetObjectItem(current, "temperature_2m") : nullptr;
+    cJSON* f = current ? cJSON_GetObjectItem(current, "apparent_temperature") : nullptr;
+    cJSON* h = current ? cJSON_GetObjectItem(current, "relative_humidity_2m") : nullptr;
+    cJSON* tm = current ? cJSON_GetObjectItem(current, "time") : nullptr;
+    if (t == nullptr || !cJSON_IsNumber(t)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    // 先算好字符串，再一次性加锁写入，避免持锁做解析
+    char buf[24];
+    std::string temp, feels, hum, upd;
+    snprintf(buf, sizeof(buf), "%.0f", t->valuedouble); temp = buf;
+    if (f && cJSON_IsNumber(f)) { snprintf(buf, sizeof(buf), "%.0f", f->valuedouble); feels = buf; }
+    if (h && cJSON_IsNumber(h)) { snprintf(buf, sizeof(buf), "%.0f", h->valuedouble); hum = buf; }
+    // Open-Meteo time 形如 "2026-11-21T11:00"，直接作为 update_time，详情页可显示更新时间
+    if (tm && cJSON_IsString(tm) && tm->valuestring[0] != 0) {
+        upd = tm->valuestring;
+    }
+    cJSON_Delete(root);
+
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        latest_data_.temp = temp;
+        if (!feels.empty()) latest_data_.feels_like = feels;
+        if (!hum.empty()) latest_data_.humidity = hum;
+        if (!upd.empty()) latest_data_.update_time = upd;
+    }
+    ESP_LOGI(TAG, "Open-Meteo 实时覆盖: %s°C 体感%s°C 湿度%s%% (%s)",
+             temp.c_str(), feels.c_str(), hum.c_str(), upd.c_str());
     return true;
 }
 
