@@ -508,17 +508,22 @@ static esp_err_t LocalCallHandler(httpd_req_t *req) {
     if (!CheckAuth(req)) {
         return ESP_OK;
     }
-    char query[1024] = {0};
-    char toolbuf[64] = {0};
-    char argsbuf[768] = {0};
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-        httpd_query_key_value(query, "tool", toolbuf, sizeof(toolbuf)) != ESP_OK ||
-        httpd_query_key_value(query, "args", argsbuf, sizeof(argsbuf)) != ESP_OK) {
+    // 用 std::string 堆分配，避免大 char 数组触发 -Werror=frame-larger-than=1536
+    std::string query(1024, '\0');
+    std::string toolbuf(64, '\0');
+    std::string argsbuf(768, '\0');
+    if (httpd_req_get_url_query_str(req, &query[0], query.size()) != ESP_OK ||
+        httpd_query_key_value(query.c_str(), "tool", &toolbuf[0], toolbuf.size()) != ESP_OK ||
+        httpd_query_key_value(query.c_str(), "args", &argsbuf[0], argsbuf.size()) != ESP_OK) {
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
         return httpd_resp_send(req, "missing tool or args\n", HTTPD_RESP_USE_STRLEN);
     }
-    UrlDecodeInPlace(toolbuf);
-    UrlDecodeInPlace(argsbuf);
+    toolbuf.resize(std::strlen(toolbuf.c_str()));
+    argsbuf.resize(std::strlen(argsbuf.c_str()));
+    UrlDecodeInPlace(&toolbuf[0]);
+    UrlDecodeInPlace(&argsbuf[0]);
+    toolbuf.resize(std::strlen(toolbuf.c_str()));
+    argsbuf.resize(std::strlen(argsbuf.c_str()));
     std::string out;
     bool ok = LocalMcpBridge::GetInstance().Call(toolbuf, argsbuf, out);
     std::string resp = std::string("ok=") + (ok ? "1" : "0") + "\n" + out + "\n";
