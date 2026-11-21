@@ -121,6 +121,16 @@ static bool is_valid_display_city(const char* city) {
 
 // 优先使用更像“真实地名”的字段，避免把 "Ip" 显示到页面上
 static std::string pick_city_name_for_display(cJSON* first_city, const std::string& fallback_city) {
+    cJSON* adm2 = cJSON_GetObjectItem(first_city, "adm2");
+    cJSON* name = cJSON_GetObjectItem(first_city, "name");
+    std::string adm2s = (adm2 && cJSON_IsString(adm2)) ? adm2->valuestring : "";
+    std::string names = (name && cJSON_IsString(name)) ? name->valuestring : "";
+    // 直辖市：adm2 就是直辖市名本身（北京/上海/天津/重庆），应显示更具体的区名（如"昌平"）
+    // 否则用户看到"北京"但数据是昌平的，会误以为数据串了
+    bool is_municipality = (adm2s == "北京" || adm2s == "上海" || adm2s == "天津" || adm2s == "重庆");
+    if (is_municipality && !names.empty() && names != adm2s && is_valid_display_city(names.c_str())) {
+        return names;
+    }
     const char* keys[] = {"adm2", "adm1", "name"};
     for (const char* key : keys) {
         cJSON* item = cJSON_GetObjectItem(first_city, key);
