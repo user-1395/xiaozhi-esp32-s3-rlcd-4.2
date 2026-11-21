@@ -747,8 +747,9 @@ bool WeatherManager::update() {
     // 2) 免密钥兜底：中国天气网 -> Open-Meteo
     if (updateItboy()) {
         // itboy 的 wendu 字段常停留在清晨旧值（曾观测到 0.0°C 而同刻实况 3.5°C），
-        // 用 Open-Meteo 覆盖温度/体感/湿度三项实时值，其余维度（AQI/风力/日出日落/预报）
-        // 保留 itboy 数据，避免 US AQI 与国内 AQI 标准不一致。覆盖失败时保留 itboy 原值。
+        // 三天预报温度也偏高（itboy 7/0、7/-2、9/0 vs Open-Meteo 5/-0、6/-2、8/-1）。
+        // 用 Open-Meteo 覆盖温度/体感/湿度实时值 + 三天预报高低温；其余维度（天气文字/风力/
+        // 日出日落/AQI）保留 itboy。覆盖失败时保留 itboy 原值。
         overlayRealtimeFromOpenMeteo();
         return true;
     }
@@ -1115,10 +1116,11 @@ bool WeatherManager::overlayRealtimeFromOpenMeteo() {
     const float lon = (gp != nullptr) ? gp->lon : WEATHER_LON;
     char coords[64];
     snprintf(coords, sizeof(coords), "%.4f&longitude=%.4f", (double)lat, (double)lon);
-    // 只取三项实时值，无 daily，响应体小、解析快
+    // 同时取实时值 + daily 高低温（itboy 的 wendu 和预报温度都偏旧，用 Open-Meteo 校正）
     std::string url = std::string("https://api.open-meteo.com/v1/forecast?latitude=") + coords +
                       "&current=temperature_2m,apparent_temperature,relative_humidity_2m"
-                      "&timezone=Asia%2FShanghai";
+                      "&daily=temperature_2m_max,temperature_2m_min"
+                      "&forecast_days=4&timezone=Asia%2FShanghai";
 
     std::string body;
     if (!httpGetRaw(url, 10000, true, body)) {
@@ -1153,6 +1155,31 @@ bool WeatherManager::overlayRealtimeFromOpenMeteo() {
     if (tm && cJSON_IsString(tm) && tm->valuestring[0] != 0) {
         upd = tm->valuestring;
     }
+
+    // 解析 daily 高低温到小数组（按日期匹配 itboy 三天预报），避免拷贝大对象导致栈帧超限
+    struct DailyTmp { char date[16]; char hi[8]; char lo[8]; };
+    DailyTmp dt[4];
+    int dn = 0;
+    cJSON* daily = cJSON_GetObjectItem(root, "daily");
+    cJSON* dtime = daily ? cJSON_GetObjectItem(daily, "time") : nullptr;
+    cJSON* dhi = daily ? cJSON_GetObjectItem(daily, "temperature_2m_max") : nullptr;
+    cJSON* dlo = daily ? cJSON_GetObjectItem(daily, "temperature_2m_min") : nullptr;
+    if (dtime && cJSON_IsArray(dtime)) {
+        int sz = cJSON_GetArraySize(dtime);
+        if (sz > 4) sz = 4;
+        for (int i = 0; i < sz; ++i) {
+            cJSON* tv = cJSON_GetArrayItem(dtime, i);
+            if (!tv || !cJSON_IsString(tv) || tv->valuestring[0] == 0) continue;
+            snprintf(dt[dn].date, sizeof(dt[dn].date), "%s", tv->valuestring);
+            cJSON* hv = dhi ? cJSON_GetArrayItem(dhi, i) : nullptr;
+            cJSON* lv = dlo ? cJSON_GetArrayItem(dlo, i) : nullptr;
+            int hi = (hv && cJSON_IsNumber(hv)) ? (int)((hv->valuedouble >= 0) ? hv->valuedouble + 0.5 : hv->valuedouble - 0.5) : 0;
+            int lo = (lv && cJSON_IsNumber(lv)) ? (int)((lv->valuedouble >= 0) ? lv->valuedouble + 0.5 : lv->valuedouble - 0.5) : 0;
+            snprintf(dt[dn].hi, sizeof(dt[dn].hi), "%d", hi);
+            snprintf(dt[dn].lo, sizeof(dt[dn].lo), "%d", lo);
+            ++dn;
+        }
+    }
     cJSON_Delete(root);
 
     {
@@ -1161,9 +1188,21 @@ bool WeatherManager::overlayRealtimeFromOpenMeteo() {
         if (!feels.empty()) latest_data_.feels_like = feels;
         if (!hum.empty()) latest_data_.humidity = hum;
         if (!upd.empty()) latest_data_.update_time = upd;
+        // 按日期匹配覆盖 itboy 的三天预报高低温，天气文字/风力/日出日落仍保留 itboy
+        int overwritten = 0;
+        for (int i = 0; i < latest_data_.daily_count && i < 3; ++i) {
+            for (int j = 0; j < dn; ++j) {
+                if (latest_data_.daily[i].date == dt[j].date) {
+                    latest_data_.daily[i].temp_max = dt[j].hi;
+                    latest_data_.daily[i].temp_min = dt[j].lo;
+                    ++overwritten;
+                    break;
+                }
+            }
+        }
+        ESP_LOGI(TAG, "Open-Meteo 覆盖: 实时%s°C 体感%s°C 湿度%s%% (%s) 预报覆盖%d天",
+                 temp.c_str(), feels.c_str(), hum.c_str(), upd.c_str(), overwritten);
     }
-    ESP_LOGI(TAG, "Open-Meteo 实时覆盖: %s°C 体感%s°C 湿度%s%% (%s)",
-             temp.c_str(), feels.c_str(), hum.c_str(), upd.c_str());
     return true;
 }
 
