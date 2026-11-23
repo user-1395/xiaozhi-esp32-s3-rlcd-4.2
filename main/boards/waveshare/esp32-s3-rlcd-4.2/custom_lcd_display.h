@@ -216,6 +216,11 @@ public:
     // out 容量需 >= 62 + ((w+31)/32*4) * h；成功返回 true 并写 *out_len
     bool CaptureScreenBmp(uint8_t *out, size_t cap, size_t *out_len);
 
+    // 软件反色：true=深底白字，false=浅底黑字（面板极性恒 0x20，送显位流取反）。
+    // 持锁切换并强制整帧重送一次，切换立即生效，且与 LVGL flush 互斥。
+    void SetInversion(bool enabled);
+    bool inversion() const;
+
     // 1-bit 二值化抖动模式：0=硬阈值(旧行为) 1=Bayer4x4 2=Bayer8x8(默认)
     void SetDitherMode(int mode);
     int GetDitherMode() const;

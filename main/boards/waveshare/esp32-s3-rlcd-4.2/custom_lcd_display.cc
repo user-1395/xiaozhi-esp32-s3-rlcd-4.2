@@ -195,6 +195,24 @@ void CustomLcdDisplay::RedrawAll()
     lv_obj_invalidate(lv_screen_active());
 }
 
+// 软件反色切换：设标志 + 强制整帧重送。
+// 反色只改送显位流、不改 DispBuffer，故 invalidate 不会触发重绘（内容未变会被 skip），
+// 必须在这里直接整帧重送一次才能立即生效；持锁避免与 LVGL flush 任务竞争 SPI/显存。
+void CustomLcdDisplay::SetInversion(bool enabled)
+{
+    if (rlcd_ == nullptr) return;
+    DisplayLockGuard lock(this);
+    rlcd_->SetInversion(enabled);
+    PowerManager::ApbMaxGuard apb_guard;
+    PowerManager::NoLightSleepGuard sleep_guard;
+    rlcd_->RLCD_Display();
+}
+
+bool CustomLcdDisplay::inversion() const
+{
+    return rlcd_ != nullptr && rlcd_->inversion();
+}
+
 // 累积/合并脏区条带：间隙小于 kFlushMergeGap 的条带合并，条带过多则退化为整帧
 void CustomLcdDisplay::FlushAddRange(int x1, int x2)
 {

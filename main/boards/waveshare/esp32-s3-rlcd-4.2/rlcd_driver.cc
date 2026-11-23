@@ -53,18 +53,21 @@ RlcdDriver::RlcdDriver(spi_display_config_t spiconfig, int width, int height,
     // 分配 1-bit 显示缓冲区
     DisplayLen = transfer >> 3;
     DispBuffer = (uint8_t *)heap_caps_malloc(DisplayLen, MALLOC_CAP_SPIRAM);
+    // 软件反色送显临时缓冲（按位取反后送面板；与 DispBuffer 等大）
+    InvertBuffer = (uint8_t *)heap_caps_malloc(DisplayLen, MALLOC_CAP_SPIRAM);
 
     // 分配像素映射 LUT（加速 RGB565 → 1-bit 转换）
     PixelIndexLUT = (uint16_t (*)[RLCD_LUT_STRIDE])heap_caps_malloc((size_t)width_ * RLCD_LUT_STRIDE * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     PixelBitLUT   = (uint8_t (*)[RLCD_LUT_STRIDE])heap_caps_malloc((size_t)width_ * RLCD_LUT_STRIDE * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
 
     // PSRAM 不足时不能 assert/panic：记录失败并让上层降级（RLCD_Init 返回 false）
-    if (DispBuffer == nullptr || PixelIndexLUT == nullptr || PixelBitLUT == nullptr) {
-        ESP_LOGE(TAG, "显存/LUT 分配失败 (disp=%u idx=%u bit=%u bytes)，显示功能降级",
-                 (unsigned)DisplayLen,
+    if (DispBuffer == nullptr || InvertBuffer == nullptr || PixelIndexLUT == nullptr || PixelBitLUT == nullptr) {
+        ESP_LOGE(TAG, "显存/LUT 分配失败 (disp=%u inv=%u idx=%u bit=%u bytes)，显示功能降级",
+                 (unsigned)DisplayLen, (unsigned)(InvertBuffer ? 1 : 0),
                  (unsigned)((size_t)width_ * RLCD_LUT_STRIDE * sizeof(uint16_t)),
                  (unsigned)((size_t)width_ * RLCD_LUT_STRIDE * sizeof(uint8_t)));
         if (DispBuffer) { heap_caps_free(DispBuffer); DispBuffer = nullptr; }
+        if (InvertBuffer) { heap_caps_free(InvertBuffer); InvertBuffer = nullptr; }
         if (PixelIndexLUT) { heap_caps_free(PixelIndexLUT); PixelIndexLUT = nullptr; }
         if (PixelBitLUT) { heap_caps_free(PixelBitLUT); PixelBitLUT = nullptr; }
         DisplayLen = 0;
@@ -84,6 +87,7 @@ RlcdDriver::RlcdDriver(spi_display_config_t spiconfig, int width, int height,
 
 RlcdDriver::~RlcdDriver() {
     if (DispBuffer) heap_caps_free(DispBuffer);
+    if (InvertBuffer) heap_caps_free(InvertBuffer);
     if (PixelIndexLUT) heap_caps_free(PixelIndexLUT);
     if (PixelBitLUT) heap_caps_free(PixelBitLUT);
 }
@@ -138,7 +142,18 @@ void RlcdDriver::RLCD_SendData(uint8_t Data) {
 }
 
 void RlcdDriver::RLCD_Sendbuffera(uint8_t *Data, int len) {
-    ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_handle_, -1, Data, len));
+    // v10 软件反色：在送显的最后一刻把位流按字节取反。
+    // DispBuffer 保持浅极性语义不变（截图 /dbg 仍读到原始渲染结果）；
+    // 面板驱动极性恒为 0x20（正常），与浅色完全一致的波形，避免硬件 0x21
+    // 反色导致的左上角边缘像素电压临界闪烁。
+    if (software_invert_.load() && InvertBuffer != nullptr && len > 0 && len <= DisplayLen) {
+        for (int i = 0; i < len; i++) {
+            InvertBuffer[i] = (uint8_t)~Data[i];
+        }
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_handle_, -1, InvertBuffer, len));
+    } else {
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_handle_, -1, Data, len));
+    }
 }
 
 void RlcdDriver::RLCD_Reset() {
@@ -324,7 +339,10 @@ void RlcdDriver::SetContrast(uint8_t level) {
 }
 
 void RlcdDriver::SetInversion(bool enabled) {
-    // 0x20 = Display Inversion OFF（浅底黑字），0x21 = Display Inversion ON（深底白字）
-    RLCD_SendCommand(enabled ? 0x21 : 0x20);
-    ESP_LOGI(TAG, "屏幕反色: %s (0x%02X)", enabled ? "开(深底)" : "关(浅底)", enabled ? 0x21 : 0x20);
+    // v10：不再发 0x21/0x20 硬件反色命令。面板极性恒为初始化时的 0x20，
+    // 深色/浅色只通过「送显位流是否取反」实现（见 RLCD_Sendbuffera）。
+    // 调用方需在持有 DisplayLock 时触发一次 RLCD_Display() 让切换立即生效。
+    software_invert_.store(enabled);
+    ESP_LOGI(TAG, "软件反色: %s (面板极性恒 0x20，送显位流取反)",
+             enabled ? "开(深底白字)" : "关(浅底黑字)");
 }

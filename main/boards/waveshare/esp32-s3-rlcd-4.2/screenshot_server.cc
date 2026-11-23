@@ -411,7 +411,8 @@ static const httpd_uri_t kDitherUri = {
     .user_ctx = nullptr,
 };
 
-// v9: 运行时切换反色（深底/浅底），用于诊断边缘像素闪烁是否与反色显示相关
+// v10: 软件反色切换（深底/浅底）。面板极性恒 0x20，送显位流取反，
+// 避免硬件 0x21 反色导致的左上角边缘像素闪烁。
 static esp_err_t InvertHandler(httpd_req_t *req) {
     if (!CheckAuth(req)) {
         return ESP_OK;
@@ -427,11 +428,13 @@ static esp_err_t InvertHandler(httpd_req_t *req) {
         on = atoi(value);
     }
     if (on == 0 || on == 1) {
-        s_display->rlcd()->SetInversion(on == 1);
+        s_display->SetInversion(on == 1);
     }
-    char out[96];
-    int n = snprintf(out, sizeof(out), "inversion=%s (on=1 深底白字 / on=0 浅底黑字)\n",
-                     on < 0 ? "unchanged" : (on ? "on" : "off"));
+    char out[128];
+    int n = snprintf(out, sizeof(out),
+                     "inversion=%s (当前=%s; on=1 深底白字 / on=0 浅底黑字, 软件取反无闪烁)\n",
+                     on < 0 ? "unchanged" : (on ? "on" : "off"),
+                     s_display->inversion() ? "on" : "off");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, out, n);
