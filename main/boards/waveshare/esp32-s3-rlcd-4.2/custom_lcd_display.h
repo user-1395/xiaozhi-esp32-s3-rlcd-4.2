@@ -221,6 +221,10 @@ public:
     void SetInversion(bool enabled);
     bool inversion() const;
 
+    // VCOM 电压/对比度 (0x00-0x1F)：持锁设置并强制整帧重送，用于运行时诊断闪烁。
+    void SetVcom(uint8_t level);
+    uint8_t vcomLevel() const;
+
     // 1-bit 二值化抖动模式：0=硬阈值(旧行为) 1=Bayer4x4 2=Bayer8x8(默认)
     void SetDitherMode(int mode);
     int GetDitherMode() const;

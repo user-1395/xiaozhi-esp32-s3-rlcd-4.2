@@ -213,6 +213,22 @@ bool CustomLcdDisplay::inversion() const
     return rlcd_ != nullptr && rlcd_->inversion();
 }
 
+// VCOM 电压设置：改电压后需重送一帧才能在面板上体现新对比度。
+void CustomLcdDisplay::SetVcom(uint8_t level)
+{
+    if (rlcd_ == nullptr) return;
+    DisplayLockGuard lock(this);
+    rlcd_->SetContrast(level);
+    PowerManager::ApbMaxGuard apb_guard;
+    PowerManager::NoLightSleepGuard sleep_guard;
+    rlcd_->RLCD_Display();
+}
+
+uint8_t CustomLcdDisplay::vcomLevel() const
+{
+    return rlcd_ != nullptr ? rlcd_->vcom_level() : 0x11;
+}
+
 // 累积/合并脏区条带：间隙小于 kFlushMergeGap 的条带合并，条带过多则退化为整帧
 void CustomLcdDisplay::FlushAddRange(int x1, int x2)
 {

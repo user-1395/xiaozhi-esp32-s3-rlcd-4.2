@@ -447,6 +447,85 @@ static const httpd_uri_t kInvertUri = {
     .user_ctx = nullptr,
 };
 
+// v11: VCOM 电压运行时校准。?level=0x0C..0x16 设置，无参数读当前值。
+static esp_err_t VcomHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    if (s_display == nullptr || s_display->rlcd() == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
+    }
+    char query[64] = {0};
+    char value[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "level", value, sizeof(value)) == ESP_OK) {
+        // 支持 0x 前缀十六进制或十进制
+        char *endp = nullptr;
+        long lv = strtol(value, &endp, 0);
+        if (endp != value && lv >= 0 && lv <= 0x1F) {
+            s_display->SetVcom((uint8_t)lv);
+        }
+    }
+    char out[96];
+    int n = snprintf(out, sizeof(out), "vcom=0x%02X (推荐 0x0D~0x15, 默认 0x11)\n",
+                     s_display->vcomLevel());
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+static const httpd_uri_t kVcomUri = {
+    .uri = "/vcom",
+    .method = HTTP_GET,
+    .handler = VcomHandler,
+    .user_ctx = nullptr,
+};
+
+// v11: VCOM 校准网页面板——每个候选值一个按钮，点一下即设置并回读，
+// 配合 /invert?on=1 深色模式肉眼观察左上角是否还闪。
+static const char kVcomTestHtml[] =
+    "<!doctype html><html><head><meta charset='utf-8'><title>VCOM 校准</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:sans-serif;margin:20px;background:#fafafa;color:#222}"
+    "h1{font-size:20px}.row{margin:8px 0}a.btn{display:inline-block;padding:8px 14px;margin:3px;"
+    "background:#fff;border:2px solid #444;border-radius:6px;text-decoration:none;color:#111;font-weight:bold}"
+    "a.btn.cur{background:#444;color:#fff}small{color:#666}</style></head><body>"
+    "<h1>VCOM 电压校准（找深色闪烁最小的电压）</h1>"
+    "<p>先在设备上切到<strong>深色</strong>（地址栏打开 <code>/invert?on=1</code>），然后逐个点下面的电压值，"
+    "每点一次看屏幕<strong>左上角那排像素</strong>还闪不闪，找到不闪的值记下来。</p>"
+    "<p>当前 VCOM: <strong id='cur'>--</strong> &nbsp; <small>默认 0x11，推荐范围 0x0D~0x15</small></p>"
+    "<div class='row' id='low'></div><div class='row' id='mid'></div><div class='row' id='high'></div>"
+    "<script>"
+    "var vals=[0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16];"
+    "function build(){['low','mid','high'].forEach(function(id,i){\n"
+    "  var box=document.getElementById(id);box.innerHTML='';\n"
+    "  vals.slice(i*4,i*4+4).forEach(function(v){\n"
+    "    var a=document.createElement('a');a.className='btn'+(v===cur?' cur':'');\n"
+    "    a.href='javascript:void(0)';a.textContent='0x'+v.toString(16).toUpperCase().padStart(2,'0');\n"
+    "    a.onclick=function(){fetch('/vcom?level='+v).then(function(r){return r.text()}).then(function(t){cur=v;build();});};"
+    "    box.appendChild(a);});});}\n"
+    "var cur=0x11;"
+    "fetch('/vcom').then(function(r){return r.text()}).then(function(t){"
+    "  var m=t.match(/0x([0-9A-Fa-f]{2})/);if(m){cur=parseInt(m[1],16);}"
+    "  document.getElementById('cur').textContent='0x'+cur.toString(16).toUpperCase().padStart(2,'0');build();});"
+    "</script></body></html>";
+
+static esp_err_t VcomTestHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, kVcomTestHtml, strlen(kVcomTestHtml));
+}
+
+static const httpd_uri_t kVcomTestUri = {
+    .uri = "/vcomtest",
+    .method = HTTP_GET,
+    .handler = VcomTestHandler,
+    .user_ctx = nullptr,
+};
+
 static const httpd_uri_t kMusicPlayUri = {
     .uri = "/music_play",
     .method = HTTP_GET,
@@ -598,7 +677,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 16;      // 调试端点已超过默认 8 个
+    config.max_uri_handlers = 18;      // 调试端点已超过默认 8 个（含 v11 /vcom /vcomtest）
     config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
@@ -611,6 +690,8 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kDbgUri);
     httpd_register_uri_handler(s_server, &kDitherUri);
     httpd_register_uri_handler(s_server, &kInvertUri);
+    httpd_register_uri_handler(s_server, &kVcomUri);
+    httpd_register_uri_handler(s_server, &kVcomTestUri);
     httpd_register_uri_handler(s_server, &kPageUri);
     httpd_register_uri_handler(s_server, &kCountdownUri);
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);

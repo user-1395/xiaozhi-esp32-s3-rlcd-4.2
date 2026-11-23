@@ -330,12 +330,13 @@ void RlcdDriver::SetContrast(uint8_t level) {
     //   推荐范围：0x0D-0x15（在 0x11 附近微调）
     
     if (level > 0x1F) level = 0x1F;
-    
+
     RLCD_SendCommand(0xC0);  // VCOM 控制寄存器
     RLCD_SendData(level);    // 设置 VCOM 高电压
     RLCD_SendData(0x04);     // 设置 VCOM 低电压（保持默认）
-    
-    ESP_LOGI(TAG, "屏幕对比度已设置为: 0x%02X", level);
+    vcom_level_ = level;
+
+    ESP_LOGI(TAG, "VCOM 电压已设置为: 0x%02X", level);
 }
 
 void RlcdDriver::SetInversion(bool enabled) {
