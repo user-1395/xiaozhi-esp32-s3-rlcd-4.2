@@ -188,7 +188,9 @@ bool RlcdDriver::RLCD_Init() {
     RLCD_SendCommand(0x3A); RLCD_SendData(0x11);
     RLCD_SendCommand(0xB9); RLCD_SendData(0x20);
     RLCD_SendCommand(0xB8); RLCD_SendData(0x29);
-    RLCD_SendCommand(0x21);
+    // v9: 默认改为正常显示（浅底黑字）。原 0x21=反色(深底白字)。
+    // 运行时可用 /invert?on=1 切回深底，便于对比观察闪烁是否与反色相关。
+    RLCD_SendCommand(0x20);
     RLCD_SendCommand(0x2A); RLCD_SendData(0x12); RLCD_SendData(0x2A);
     RLCD_SendCommand(0x2B); RLCD_SendData(0x00); RLCD_SendData(0xC7);
     RLCD_SendCommand(0x35); RLCD_SendData(0x00);
@@ -319,4 +321,10 @@ void RlcdDriver::SetContrast(uint8_t level) {
     RLCD_SendData(0x04);     // 设置 VCOM 低电压（保持默认）
     
     ESP_LOGI(TAG, "屏幕对比度已设置为: 0x%02X", level);
+}
+
+void RlcdDriver::SetInversion(bool enabled) {
+    // 0x20 = Display Inversion OFF（浅底黑字），0x21 = Display Inversion ON（深底白字）
+    RLCD_SendCommand(enabled ? 0x21 : 0x20);
+    ESP_LOGI(TAG, "屏幕反色: %s (0x%02X)", enabled ? "开(深底)" : "关(浅底)", enabled ? 0x21 : 0x20);
 }

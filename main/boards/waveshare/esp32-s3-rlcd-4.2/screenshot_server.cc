@@ -411,6 +411,39 @@ static const httpd_uri_t kDitherUri = {
     .user_ctx = nullptr,
 };
 
+// v9: 运行时切换反色（深底/浅底），用于诊断边缘像素闪烁是否与反色显示相关
+static esp_err_t InvertHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    if (s_display == nullptr || s_display->rlcd() == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
+    }
+    char query[64] = {0};
+    char value[8] = {0};
+    int on = -1;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "on", value, sizeof(value)) == ESP_OK) {
+        on = atoi(value);
+    }
+    if (on == 0 || on == 1) {
+        s_display->rlcd()->SetInversion(on == 1);
+    }
+    char out[96];
+    int n = snprintf(out, sizeof(out), "inversion=%s (on=1 深底白字 / on=0 浅底黑字)\n",
+                     on < 0 ? "unchanged" : (on ? "on" : "off"));
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+static const httpd_uri_t kInvertUri = {
+    .uri = "/invert",
+    .method = HTTP_GET,
+    .handler = InvertHandler,
+    .user_ctx = nullptr,
+};
+
 static const httpd_uri_t kMusicPlayUri = {
     .uri = "/music_play",
     .method = HTTP_GET,
@@ -574,6 +607,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kShotUri);
     httpd_register_uri_handler(s_server, &kDbgUri);
     httpd_register_uri_handler(s_server, &kDitherUri);
+    httpd_register_uri_handler(s_server, &kInvertUri);
     httpd_register_uri_handler(s_server, &kPageUri);
     httpd_register_uri_handler(s_server, &kCountdownUri);
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);

@@ -49,6 +49,8 @@ public:
     void RLCD_DisplayXRange(uint16_t x1, uint16_t x2);
     // 设置屏幕对比度 (0x00-0x1F)
     void SetContrast(uint8_t level);
+    // 设置反色显示：true=0x21 反色(深底白字)，false=0x20 正常(浅底黑字)
+    void SetInversion(bool enabled);
 
     // 获取屏幕尺寸
     int width() const { return width_; }
