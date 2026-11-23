@@ -254,8 +254,10 @@ void CustomLcdDisplay::FlushCommit()
             covered += flush_ranges_[i].x2 - flush_ranges_[i].x1 + 1;
         }
         // 覆盖超过 60% 宽度时，逐条带的命令开销大于省下的数据量，直接整帧
-        const bool use_full = flush_first_frame_ || flush_force_full_ ||
-                              (covered * 5 >= scr_w * 3);
+        // A/B 测试 v8：强制整帧刷新，验证左上角像素闪烁是否由局部刷新(0x2B 窗口边界)引起。
+        // 若闪烁消失即确诊；整帧 15000B @ 40MHz 约 3ms，静态界面可接受。
+        const bool use_full = true;  // 原: flush_first_frame_ || flush_force_full_ || (covered * 5 >= scr_w * 3);
+        (void)covered;  // 保留计算但抑制 -Wunused 警告，便于回退
         const int64_t t0 = esp_timer_get_time();
         // SPI 传输期间需要 APB 80 MHz 且不能进入 light sleep
         PowerManager::ApbMaxGuard apb_guard;
