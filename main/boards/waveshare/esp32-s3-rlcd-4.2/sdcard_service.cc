@@ -166,11 +166,14 @@ std::string SdcardService::CardInfo() {
     }
     sdmmc_card_t* card = (sdmmc_card_t*)card_;
     char buf[160];
-    // 只用稳定公开字段，避免不同 IDF 版本结构差异导致编译失败
+    // 只用稳定公开字段，避免不同 IDF 版本结构差异导致编译失败。
+    // csd.capacity 是 512 字节块数，各 IDF 版本都存在。
+    unsigned long long capacity_mb =
+        (unsigned long long)card->csd.capacity / 2048ULL;  // blocks -> MB
     snprintf(buf, sizeof(buf),
-             "name=%s sector_count=%u speed=%dMHz",
+             "name=%s capacity=%lluMB speed=%dMHz",
              card->cid.name,
-             (unsigned)sdmmc_get_sector_count(card),
+             capacity_mb,
              card->max_freq_khz / 1000);
     return std::string(buf);
 }
