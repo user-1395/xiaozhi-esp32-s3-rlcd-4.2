@@ -51,6 +51,9 @@ void CustomLcdDisplay::StartDataUpdateTask() {
     // 栈从 16KB 下调到 8KB，给音频/MQTT 留更多 SRAM 余量
     // 优先级保持较低，避免与语音收发实时链路抢占 CPU
     xTaskCreate(DataUpdateTask, "weather_ui_update", 8192, this, 2, &update_task_handle_);
+
+    // 持续刷新任务默认不启动：深色闪烁排查已结束（面板边缘特性，软件无解），
+    // 默认浅色无需持续刷新。需要时仍可通过 /refresh?on=1 手动开启做诊断。
 }
 
 void CustomLcdDisplay::DataUpdateTask(void *arg) {

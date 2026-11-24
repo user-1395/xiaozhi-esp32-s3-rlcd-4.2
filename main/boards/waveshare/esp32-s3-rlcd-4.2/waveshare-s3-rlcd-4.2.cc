@@ -1140,10 +1140,9 @@ public:
                         ESP_LOGI(TAG, "设备 IP: " IPSTR "，截图地址: http://" IPSTR ":8080/shot.bmp",
                                  IP2STR(&ip_info.ip), IP2STR(&ip_info.ip));
                     }
-                    // 挂载 SD 卡（非致命：没插卡/格式不对只告警，不影响主功能）
-                    SdcardService::GetInstance().Init();
-
                     if (display_ != nullptr) {
+                        // 挂载 SD 卡（非致命：没插卡/格式不对只告警，不影响主功能）
+                        SdcardService::GetInstance().Init();
                         ScreenshotServerStart(display_);
                     }
                 }
