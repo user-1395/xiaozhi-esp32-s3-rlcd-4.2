@@ -1,6 +1,7 @@
 #ifndef __RLCD_DRIVER_H__
 #define __RLCD_DRIVER_H__
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <driver/gpio.h>
@@ -47,8 +48,15 @@ public:
     // 局部刷新：只把 x∈[x1,x2] 的竖直条带送到屏幕（x 自动对齐到 2 像素对）
     // 仅横屏（width > height）支持；竖屏 LUT 为行优先，退化为整帧刷新
     void RLCD_DisplayXRange(uint16_t x1, uint16_t x2);
-    // 设置屏幕对比度 (0x00-0x1F)
+    // 设置 VCOM 电压/对比度 (0x00-0x1F)，对应 0xC0 命令
     void SetContrast(uint8_t level);
+    uint8_t vcom_level() const { return vcom_level_; }
+    // 软件反色：true=深底白字，false=浅底黑字。
+    // v10 起改为「送显位流按位取反」实现，不再发 0x21 硬件反色命令——
+    // 硬件反色会改变面板驱动极性，实测导致左上角边缘像素闪烁；软件反色保持
+    // 面板极性恒为 0x20（正常），与浅色完全一致的驱动波形，故不会闪。
+    void SetInversion(bool enabled);
+    bool inversion() const { return software_invert_.load(); }
 
     // 获取屏幕尺寸
     int width() const { return width_; }
@@ -95,9 +103,13 @@ private:
     // SPI IO 句柄
     esp_lcd_panel_io_handle_t io_handle_ = nullptr;
 
-    // 1-bit 显示缓冲区
+    // 1-bit 显示缓冲区（渲染结果，浅极性语义：bit=1 白 / bit=0 黑）
     uint8_t *DispBuffer = nullptr;
     int DisplayLen = 0;
+    // 软件反色送显临时缓冲（DispBuffer 逐字节取反后送到面板，不改渲染结果/截图）
+    uint8_t *InvertBuffer = nullptr;
+    std::atomic<bool> software_invert_{false};
+    uint8_t vcom_level_ = 0x11;   // 当前 VCOM 电压，初始化默认 0x11
     // 显存/LUT 是否分配成功；false 时所有绘制调用安全降级（不 panic）
     bool init_ok_ = false;
 
