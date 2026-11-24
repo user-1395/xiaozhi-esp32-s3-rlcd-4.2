@@ -171,9 +171,9 @@ std::string SdcardService::CardInfo() {
     unsigned long long capacity_mb =
         (unsigned long long)card->csd.capacity / 2048ULL;  // blocks -> MB
     snprintf(buf, sizeof(buf),
-             "name=%s capacity=%lluMB speed=%dMHz",
+             "name=%s capacity=%lluMB speed=%uMHz",
              card->cid.name,
              capacity_mb,
-             card->max_freq_khz / 1000);
+             (unsigned)(card->max_freq_khz / 1000));
     return std::string(buf);
 }

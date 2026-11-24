@@ -195,6 +195,93 @@ void CustomLcdDisplay::RedrawAll()
     lv_obj_invalidate(lv_screen_active());
 }
 
+// 软件反色切换：设标志 + 强制整帧重送。
+// 反色只改送显位流、不改 DispBuffer，故 invalidate 不会触发重绘（内容未变会被 skip），
+// 必须在这里直接整帧重送一次才能立即生效；持锁避免与 LVGL flush 任务竞争 SPI/显存。
+void CustomLcdDisplay::SetInversion(bool enabled)
+{
+    if (rlcd_ == nullptr) return;
+    DisplayLockGuard lock(this);
+    rlcd_->SetInversion(enabled);
+    PowerManager::ApbMaxGuard apb_guard;
+    PowerManager::NoLightSleepGuard sleep_guard;
+    rlcd_->RLCD_Display();
+}
+
+bool CustomLcdDisplay::inversion() const
+{
+    return rlcd_ != nullptr && rlcd_->inversion();
+}
+
+// VCOM 电压设置：改电压后需重送一帧才能在面板上体现新对比度。
+void CustomLcdDisplay::SetVcom(uint8_t level)
+{
+    if (rlcd_ == nullptr) return;
+    DisplayLockGuard lock(this);
+    rlcd_->SetContrast(level);
+    PowerManager::ApbMaxGuard apb_guard;
+    PowerManager::NoLightSleepGuard sleep_guard;
+    rlcd_->RLCD_Display();
+}
+
+uint8_t CustomLcdDisplay::vcomLevel() const
+{
+    return rlcd_ != nullptr ? rlcd_->vcom_level() : 0x11;
+}
+
+// ===== v12: 持续刷新任务（对齐微雪官方 U8G2 例程快速刷新）=====
+// 官方深色背景不闪：每 13ms 重送整帧，深色像素电荷持续维持。
+// 小智原本事件驱动静态刷新（画面不变跳过 SPI），深色像素电荷泄漏→左上角 band 边界闪。
+// 本任务周期性重送整帧。DisplayLockGuard=lvgl_port_lock，与 LVGL flush 任务互斥 SPI/显存。
+void CustomLcdDisplay::RefreshTask(void *arg)
+{
+    CustomLcdDisplay *self = (CustomLcdDisplay *)arg;
+    ESP_LOGI(TAG, "持续刷新任务启动，默认间隔 %d ms", self->refresh_interval_ms_.load());
+    while (self->refresh_running_.load()) {
+        const int interval = self->refresh_interval_ms_.load();
+        vTaskDelay(pdMS_TO_TICKS(interval));
+        if (!self->refresh_running_.load() || self->rlcd_ == nullptr) {
+            continue;
+        }
+        DisplayLockGuard lock(self);
+        if (!lock) {
+            continue;
+        }
+        PowerManager::ApbMaxGuard apb_guard;
+        PowerManager::NoLightSleepGuard sleep_guard;
+        self->rlcd_->RLCD_Display();   // 即使画面不变也整帧重送，维持像素电荷
+        self->stat_full_++;
+        self->stat_bytes_ += (uint64_t)self->rlcd_->display_len();
+    }
+    self->refresh_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void CustomLcdDisplay::StartRefreshTask()
+{
+    if (refresh_task_handle_ != nullptr) {
+        return;   // 已启动
+    }
+    refresh_running_.store(true);
+    // 低优先级(1) + 4KB 栈：只做加锁+整帧 SPI 重送，不碰 UI/网络
+    xTaskCreate(RefreshTask, "rlcd_auto_refresh", 4096, this, 1, &refresh_task_handle_);
+    ESP_LOGI(TAG, "持续刷新已启用：每 %d ms 整帧重送（深色防闪）", refresh_interval_ms_.load());
+}
+
+void CustomLcdDisplay::SetRefresh(bool enabled, int interval_ms)
+{
+    if (interval_ms >= 1 && interval_ms <= 200) {
+        refresh_interval_ms_.store(interval_ms);
+        ESP_LOGI(TAG, "持续刷新间隔调整为 %d ms", interval_ms);
+    }
+    if (enabled) {
+        StartRefreshTask();
+    } else {
+        refresh_running_.store(false);
+        ESP_LOGI(TAG, "持续刷新已关闭（恢复静态刷新，画面不变跳过 SPI）");
+    }
+}
+
 // 累积/合并脏区条带：间隙小于 kFlushMergeGap 的条带合并，条带过多则退化为整帧
 void CustomLcdDisplay::FlushAddRange(int x1, int x2)
 {
@@ -254,6 +341,7 @@ void CustomLcdDisplay::FlushCommit()
             covered += flush_ranges_[i].x2 - flush_ranges_[i].x1 + 1;
         }
         // 覆盖超过 60% 宽度时，逐条带的命令开销大于省下的数据量，直接整帧
+        // v8 已验证：强制整帧后左上角闪烁依旧，故排除局部刷新，恢复原逻辑。
         const bool use_full = flush_first_frame_ || flush_force_full_ ||
                               (covered * 5 >= scr_w * 3);
         const int64_t t0 = esp_timer_get_time();
@@ -354,6 +442,10 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
+    refresh_running_.store(false);
+    if (refresh_task_handle_) {
+        vTaskDelete(refresh_task_handle_);
+    }
     if (update_task_handle_) {
         vTaskDelete(update_task_handle_);
     }
@@ -969,4 +1061,114 @@ std::string CustomLcdDisplay::GetUiDebugInfo() {
     int emoji_count = -1;
     if (current_theme_) {
         auto coll = static_cast<LvglTheme *>(current_theme_)->emoji_collection();
-        has_collecti
+        has_collection = (coll != nullptr);
+        if (coll) {
+            emoji_count = coll->Count();
+        }
+    }
+    const int n = snprintf(buf, sizeof(buf),
+             "chat_status: text=\"%s\" hidden=%d pos=%d,%d size=%dx%d\n"
+             "parent: size=%dx%d content=%dx%d\n"
+             "emotion_label: text=\"%s\"\n"
+             "emotion_img: hidden=%d size=%dx%d src=%p\n"
+             "theme=%d emoji_collection=%d count=%d\n",
+             txt, (int)cs_hidden, csx, csy, csw, csh,
+             pw, ph, cw, ch,
+             emo_txt,
+             (int)img_hidden, iw, ih, img_src,
+             (int)has_theme, (int)has_collection, emoji_count);
+    if (n < 0 || (size_t)n >= sizeof(buf)) {
+        return std::string(buf) + "\n(truncated: debug buffer 1024 bytes)";
+    }
+    return std::string(buf);
+}
+
+// ===== 屏幕截图（显存 → 1bpp BMP） =====
+//
+// 直接读 RLCD 显存而不是抓 LVGL 快照：面板是 1-bit 单色，显存就是屏幕上真实的黑白像素，
+// 且只有 15000 字节，导出/传输都很轻。行按 BMP 规范自下而上、4 字节对齐。
+bool CustomLcdDisplay::CaptureScreenBmp(uint8_t *out, size_t cap, size_t *out_len) {
+    if (rlcd_ == nullptr || out == nullptr || out_len == nullptr) {
+        return false;
+    }
+
+    const int w = rlcd_->width();
+    const int h = rlcd_->height();
+    const size_t row_bytes = (size_t)(((w + 31) / 32) * 4);
+    const size_t pixel_bytes = row_bytes * (size_t)h;
+    const size_t total = 62 + pixel_bytes;
+    if (total > cap) {
+        ESP_LOGE(TAG, "截图缓冲区不足: 需要 %u, 实际 %u", (unsigned)total, (unsigned)cap);
+        return false;
+    }
+
+    // P2 #17：把「持锁逐像素读 12 万次」改为「锁内一次性 memcpy 显存快照（约 15KB）→ 解锁后再展开 BMP」。
+    // 快照放在堆上（-Werror=frame-larger-than=1536，禁止 15KB 大数组上栈）。
+    const size_t snap_len = ((size_t)w * (size_t)h) >> 3;   // 1bpp 显存字节数（400x300 = 15000）
+    if (snap_len == 0) {
+        ESP_LOGE(TAG, "截图失败: 显存未就绪");
+        return false;
+    }
+    uint8_t *snap = (uint8_t *)heap_caps_malloc(snap_len, MALLOC_CAP_SPIRAM);
+    if (snap == nullptr) {
+        ESP_LOGE(TAG, "截图失败: 快照缓冲分配失败 (%u 字节)", (unsigned)snap_len);
+        return false;
+    }
+    bool snap_ok = false;
+    {
+        DisplayLockGuard lock(this);
+        snap_ok = rlcd_->CopyDisplayBuffer(snap, snap_len);
+    }
+    if (!snap_ok) {
+        heap_caps_free(snap);
+        ESP_LOGE(TAG, "截图失败: 显存快照拷贝失败（驱动未就绪？）");
+        return false;
+    }
+
+    memset(out, 0, total);
+
+    auto put32 = [out](size_t off, uint32_t v) {
+        out[off]     = (uint8_t)(v & 0xFF);
+        out[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+        out[off + 2] = (uint8_t)((v >> 16) & 0xFF);
+        out[off + 3] = (uint8_t)((v >> 24) & 0xFF);
+    };
+    auto put16 = [out](size_t off, uint16_t v) {
+        out[off]     = (uint8_t)(v & 0xFF);
+        out[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+    };
+
+    // BITMAPFILEHEADER (14 B)
+    out[0] = 'B';
+    out[1] = 'M';
+    put32(2, (uint32_t)total);
+    put32(10, 62);                       // 像素数据偏移
+    // BITMAPINFOHEADER (40 B)
+    put32(14, 40);
+    put32(18, (uint32_t)w);
+    put32(22, (uint32_t)h);              // 正数 = 自下而上
+    put16(26, 1);                        // planes
+    put16(28, 1);                        // 1 bpp
+    put32(34, (uint32_t)pixel_bytes);
+    put32(38, 2835);                     // 72 DPI
+    put32(42, 2835);
+    put32(46, 2);                        // 调色板 2 色
+    put32(50, 2);
+    // 调色板：0 = 黑，1 = 白
+    out[54] = 0; out[55] = 0; out[56] = 0; out[57] = 0;
+    out[58] = 255; out[59] = 255; out[60] = 255; out[61] = 0;
+
+    // 解锁后基于堆快照展开 BMP，避免长时间持有显示锁
+    uint8_t *pix = out + 62;
+    for (int y = 0; y < h; y++) {
+        uint8_t *row = pix + (size_t)(h - 1 - y) * row_bytes;
+        for (int x = 0; x < w; x++) {
+            if (rlcd_->GetPixelFrom(snap, snap_len, (uint16_t)x, (uint16_t)y)) {
+                row[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+            }
+        }
+    }
+    heap_caps_free(snap);
+    *out_len = total;
+    return true;
+}
