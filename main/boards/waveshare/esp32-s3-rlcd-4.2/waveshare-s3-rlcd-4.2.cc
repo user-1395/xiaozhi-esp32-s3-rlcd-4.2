@@ -25,6 +25,7 @@
 #include "managers/todo_mcp_client.h"
 #include "managers/local_mcp_bridge.h"
 #include "screenshot_server.h"
+#include "sdcard_service.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -819,6 +820,9 @@ private:
             "spreadsheets (表格/Excel), PPT/presentations (PPT/幻灯片/演示文稿), Word documents (Word/文档/报告), "
             "PDF files, notes or text; OR asks to READ / VIEW / OPEN the content of a local file (“读一下刚才的文件/"
             "表格/PPT/文档里写了什么/查看文件内容”); OR asks about local disk space / computer status.\n"
+            "ALSO use this tool for the LOCAL KNOWLEDGE BASE (知识库/RAG/资料库): when the user asks to look up / "
+            "search knowledge (“查一下知识库/资料里有没有提到XX/文档里怎么说的/把这份文档加入知识库/知识库里有哪些文件”), "
+            "or asks to add/remove/list knowledge-base documents. Route these to kb_search / kb_add / kb_list / kb_remove.\n"
             "Available tools and their args (pass as a JSON object string in `args`):\n"
             "- create_excel: {filename, title, headers:[str], rows:[[str]], sheet_name?} -> generate .xlsx\n"
             "- read_excel: {filename, max_rows?} -> READ an .xlsx into readable text (USE THIS for xlsx)\n"
@@ -831,6 +835,11 @@ private:
             "- write_note: {filename, content} -> write a .md/.txt note\n"
             "- read_text_file: {filename} -> read a plain text/.md file\n"
             "- list_generated_files: {} -> list files on the PC\n"
+            "- kb_search: {query, top_k?} -> SEARCH the local knowledge base, returns relevant doc excerpts + sources\n"
+            "- kb_add: {path?} -> add a document/folder to the knowledge base (incremental); empty path = add all docs in kb/docs\n"
+            "- kb_list: {} -> list documents already in the knowledge base\n"
+            "- kb_remove: {name} -> remove a document from the knowledge base index\n"
+            "- kb_stats: {} -> knowledge base status (doc count, chunk count, directory)\n"
             "- list_tools: {} -> get the FULL, up-to-date tool list and usage\n"
             "- system_status: {} -> PC platform / CPU / free disk / time\n"
             "IMPORTANT: match the tool to the file type — use read_excel for xlsx, read_ppt for pptx, read_word for "
@@ -1131,6 +1140,9 @@ public:
                         ESP_LOGI(TAG, "设备 IP: " IPSTR "，截图地址: http://" IPSTR ":8080/shot.bmp",
                                  IP2STR(&ip_info.ip), IP2STR(&ip_info.ip));
                     }
+                    // 挂载 SD 卡（非致命：没插卡/格式不对只告警，不影响主功能）
+                    SdcardService::GetInstance().Init();
+
                     if (display_ != nullptr) {
                         ScreenshotServerStart(display_);
                     }

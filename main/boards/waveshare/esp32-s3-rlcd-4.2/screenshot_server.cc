@@ -20,6 +20,7 @@
 
 #include "custom_lcd_display.h"
 #include "application.h"
+#include "sdcard_service.h"
 #include "managers/weather_manager.h"
 #include "managers/local_mcp_bridge.h"
 #include <settings.h>   // P2 #14：从 NVS 读取可选鉴权 token
@@ -383,6 +384,136 @@ static esp_err_t MusicStateHandler(httpd_req_t *req) {
     return httpd_resp_send(req, out, n);
 }
 
+// ---------- SD 卡文件服务 ----------
+// GET  /sd/status             → 卡状态/容量
+// GET  /sd/list?path=/sdcard  → 列目录（JSON 数组）
+// GET  /sd/read?path=/sdcard/x.txt → 读文件（二进制原样返回）
+// POST /sd/write?path=/sdcard/x.txt (body=内容) → 写文件
+static esp_err_t SdStatusHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) return ESP_OK;
+    auto &sd = SdcardService::GetInstance();
+    std::string out = std::string("ready=") + (sd.IsReady() ? "1" : "0") +
+                      "\ninfo=" + sd.CardInfo() + "\n";
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out.c_str(), (ssize_t)out.size());
+}
+
+static esp_err_t SdListHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) return ESP_OK;
+    auto &sd = SdcardService::GetInstance();
+    if (!sd.IsReady()) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sd not ready");
+
+    char query[512] = {0};
+    char path[256] = "/sdcard";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[256] = {0};
+        if (httpd_query_key_value(query, "path", val, sizeof(val)) == ESP_OK) {
+            UrlDecodeInPlace(val);
+            snprintf(path, sizeof(path), "%s", val);
+        }
+    }
+    std::vector<std::string> entries;
+    int ret = sd.ListDir(path, entries);
+    if (ret != 0) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "open dir failed");
+
+    std::string json = "[";
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i) json += ",";
+        // 简易 JSON 转义（文件名一般无特殊字符）
+        std::string e;
+        for (char c : entries[i]) {
+            if (c == '"' || c == '\\') e += '\\';
+            e += c;
+        }
+        json += "\"" + e + "\"";
+    }
+    json += "]";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json.c_str(), (ssize_t)json.size());
+}
+
+static esp_err_t SdReadHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) return ESP_OK;
+    auto &sd = SdcardService::GetInstance();
+    if (!sd.IsReady()) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sd not ready");
+
+    char query[512] = {0};
+    char path[256] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[256] = {0};
+        if (httpd_query_key_value(query, "path", val, sizeof(val)) == ESP_OK) {
+            UrlDecodeInPlace(val);
+            snprintf(path, sizeof(path), "%s", val);
+        }
+    }
+    if (path[0] == '\0') return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "path required");
+
+    std::string data;
+    int len = sd.ReadFile(path, data);
+    if (len < 0) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "read failed");
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, data.data(), (ssize_t)data.size());
+}
+
+static esp_err_t SdWriteHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) return ESP_OK;
+    auto &sd = SdcardService::GetInstance();
+    if (!sd.IsReady()) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sd not ready");
+
+    char query[512] = {0};
+    char path[256] = {0};
+    bool append = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[256] = {0};
+        if (httpd_query_key_value(query, "path", val, sizeof(val)) == ESP_OK) {
+            UrlDecodeInPlace(val);
+            snprintf(path, sizeof(path), "%s", val);
+        }
+        char ap[8] = {0};
+        if (httpd_query_key_value(query, "append", ap, sizeof(ap)) == ESP_OK && strcmp(ap, "1") == 0) {
+            append = true;
+        }
+    }
+    if (path[0] == '\0') return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "path required");
+
+    // 分块读取 body，先写临时缓冲（PSRAM）
+    size_t total = (size_t)req->content_len;
+    char *buf = (char *)heap_caps_malloc(total + 1, MALLOC_CAP_SPIRAM);
+    if (buf == nullptr) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+    size_t got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, (size_t)(total - got));
+        if (r <= 0) { heap_caps_free(buf); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed"); }
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+
+    int ret = append ? sd.AppendFile(path, buf, got) : sd.WriteFile(path, buf, got);
+    heap_caps_free(buf);
+    if (ret < 0) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
+
+    char out[64];
+    int n = snprintf(out, sizeof(out), "ok bytes=%d\n", ret < 0 ? 0 : (int)got);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, out, (ssize_t)n);
+}
+
+static const httpd_uri_t kSdStatusUri = {
+    .uri = "/sd/status", .method = HTTP_GET, .handler = SdStatusHandler, .user_ctx = nullptr,
+};
+static const httpd_uri_t kSdListUri = {
+    .uri = "/sd/list", .method = HTTP_GET, .handler = SdListHandler, .user_ctx = nullptr,
+};
+static const httpd_uri_t kSdReadUri = {
+    .uri = "/sd/read", .method = HTTP_GET, .handler = SdReadHandler, .user_ctx = nullptr,
+};
+static const httpd_uri_t kSdWriteUri = {
+    .uri = "/sd/write", .method = HTTP_POST, .handler = SdWriteHandler, .user_ctx = nullptr,
+};
+
 static const httpd_uri_t kShotUri = {
     .uri = "/shot.bmp",
     .method = HTTP_GET,
@@ -408,165 +539,6 @@ static const httpd_uri_t kDitherUri = {
     .uri = "/dither",
     .method = HTTP_GET,
     .handler = DitherHandler,
-    .user_ctx = nullptr,
-};
-
-// v10: 软件反色切换（深底/浅底）。面板极性恒 0x20，送显位流取反，
-// 避免硬件 0x21 反色导致的左上角边缘像素闪烁。
-static esp_err_t InvertHandler(httpd_req_t *req) {
-    if (!CheckAuth(req)) {
-        return ESP_OK;
-    }
-    if (s_display == nullptr || s_display->rlcd() == nullptr) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
-    }
-    char query[64] = {0};
-    char value[8] = {0};
-    int on = -1;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "on", value, sizeof(value)) == ESP_OK) {
-        on = atoi(value);
-    }
-    if (on == 0 || on == 1) {
-        s_display->SetInversion(on == 1);
-    }
-    char out[128];
-    int n = snprintf(out, sizeof(out),
-                     "inversion=%s (当前=%s; on=1 深底白字 / on=0 浅底黑字, 软件取反无闪烁)\n",
-                     on < 0 ? "unchanged" : (on ? "on" : "off"),
-                     s_display->inversion() ? "on" : "off");
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, out, n);
-}
-
-static const httpd_uri_t kInvertUri = {
-    .uri = "/invert",
-    .method = HTTP_GET,
-    .handler = InvertHandler,
-    .user_ctx = nullptr,
-};
-
-// v11: VCOM 电压运行时校准。?level=0x0C..0x16 设置，无参数读当前值。
-static esp_err_t VcomHandler(httpd_req_t *req) {
-    if (!CheckAuth(req)) {
-        return ESP_OK;
-    }
-    if (s_display == nullptr || s_display->rlcd() == nullptr) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
-    }
-    char query[64] = {0};
-    char value[16] = {0};
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "level", value, sizeof(value)) == ESP_OK) {
-        // 支持 0x 前缀十六进制或十进制
-        char *endp = nullptr;
-        long lv = strtol(value, &endp, 0);
-        if (endp != value && lv >= 0 && lv <= 0x1F) {
-            s_display->SetVcom((uint8_t)lv);
-        }
-    }
-    char out[96];
-    int n = snprintf(out, sizeof(out), "vcom=0x%02X (推荐 0x0D~0x15, 默认 0x11)\n",
-                     s_display->vcomLevel());
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, out, n);
-}
-
-static const httpd_uri_t kVcomUri = {
-    .uri = "/vcom",
-    .method = HTTP_GET,
-    .handler = VcomHandler,
-    .user_ctx = nullptr,
-};
-
-// v11: VCOM 校准网页面板——每个候选值一个按钮，点一下即设置并回读，
-// 配合 /invert?on=1 深色模式肉眼观察左上角是否还闪。
-static const char kVcomTestHtml[] =
-    "<!doctype html><html><head><meta charset='utf-8'><title>VCOM 校准</title>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{font-family:sans-serif;margin:20px;background:#fafafa;color:#222}"
-    "h1{font-size:20px}.row{margin:8px 0}a.btn{display:inline-block;padding:8px 14px;margin:3px;"
-    "background:#fff;border:2px solid #444;border-radius:6px;text-decoration:none;color:#111;font-weight:bold}"
-    "a.btn.cur{background:#444;color:#fff}small{color:#666}</style></head><body>"
-    "<h1>VCOM 电压校准（找深色闪烁最小的电压）</h1>"
-    "<p>先在设备上切到<strong>深色</strong>（地址栏打开 <code>/invert?on=1</code>），然后逐个点下面的电压值，"
-    "每点一次看屏幕<strong>左上角那排像素</strong>还闪不闪，找到不闪的值记下来。</p>"
-    "<p>当前 VCOM: <strong id='cur'>--</strong> &nbsp; <small>默认 0x11，推荐范围 0x0D~0x15</small></p>"
-    "<div class='row' id='low'></div><div class='row' id='mid'></div><div class='row' id='high'></div>"
-    "<script>"
-    "var vals=[0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16];"
-    "function build(){['low','mid','high'].forEach(function(id,i){\n"
-    "  var box=document.getElementById(id);box.innerHTML='';\n"
-    "  vals.slice(i*4,i*4+4).forEach(function(v){\n"
-    "    var a=document.createElement('a');a.className='btn'+(v===cur?' cur':'');\n"
-    "    a.href='javascript:void(0)';a.textContent='0x'+v.toString(16).toUpperCase().padStart(2,'0');\n"
-    "    a.onclick=function(){fetch('/vcom?level='+v).then(function(r){return r.text()}).then(function(t){cur=v;build();});};"
-    "    box.appendChild(a);});});}\n"
-    "var cur=0x11;"
-    "fetch('/vcom').then(function(r){return r.text()}).then(function(t){"
-    "  var m=t.match(/0x([0-9A-Fa-f]{2})/);if(m){cur=parseInt(m[1],16);}"
-    "  document.getElementById('cur').textContent='0x'+cur.toString(16).toUpperCase().padStart(2,'0');build();});"
-    "</script></body></html>";
-
-static esp_err_t VcomTestHandler(httpd_req_t *req) {
-    if (!CheckAuth(req)) {
-        return ESP_OK;
-    }
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, kVcomTestHtml, strlen(kVcomTestHtml));
-}
-
-static const httpd_uri_t kVcomTestUri = {
-    .uri = "/vcomtest",
-    .method = HTTP_GET,
-    .handler = VcomTestHandler,
-    .user_ctx = nullptr,
-};
-
-// v12: 持续刷新开关（对齐微雪官方 U8G2 例程 74FPS 快速刷新，深底不闪）。
-// GET /refresh?on=1|0&ms=13   on=1 开 / on=0 关 / ms=间隔(1~200)；无参数只报告状态。
-static esp_err_t RefreshHandler(httpd_req_t *req) {
-    if (!CheckAuth(req)) {
-        return ESP_OK;
-    }
-    if (s_display == nullptr) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
-    }
-    char query[96] = {0};
-    char onbuf[8] = {0};
-    char msbuf[8] = {0};
-    int on = -1;
-    int ms = -1;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        if (httpd_query_key_value(query, "on", onbuf, sizeof(onbuf)) == ESP_OK) {
-            on = atoi(onbuf);
-        }
-        if (httpd_query_key_value(query, "ms", msbuf, sizeof(msbuf)) == ESP_OK) {
-            ms = atoi(msbuf);
-        }
-    }
-    if (on == 0 || on == 1) {
-        s_display->SetRefresh(on == 1, ms);
-    } else if (ms >= 1 && ms <= 200) {
-        s_display->SetRefresh(s_display->refreshEnabled(), ms);
-    }
-    char out[160];
-    int n = snprintf(out, sizeof(out),
-                     "refresh=%s interval=%dms (官方 74FPS≈13ms; on=1开 on=0关 ms=间隔)\n",
-                     s_display->refreshEnabled() ? "on" : "off",
-                     s_display->refreshIntervalMs());
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, out, n);
-}
-
-static const httpd_uri_t kRefreshUri = {
-    .uri = "/refresh",
-    .method = HTTP_GET,
-    .handler = RefreshHandler,
     .user_ctx = nullptr,
 };
 
@@ -718,16 +690,10 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     }
     s_display = display;
 
-    // v12: 默认深色背景（深底白字），对齐微雪官方 U8G2 例程外观。
-    // 配合 StartRefreshTask 的持续整帧刷新，深色像素电荷持续维持不闪。
-    // 可用 /invert?on=0 切回浅色对比。
-    display->SetInversion(true);
-    ESP_LOGI(TAG, "默认切换为深色背景（深底白字）+ 持续刷新防闪");
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 20;      // 调试端点已超过默认 8 个（含 v11 /vcom /vcomtest、v12 /refresh）
+    config.max_uri_handlers = 20;      // 调试端点 + SD 卡 4 端点已超过默认 8 个
     config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
@@ -736,13 +702,13 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
         s_bmp = nullptr;
         return false;
     }
+    httpd_register_uri_handler(s_server, &kSdStatusUri);
+    httpd_register_uri_handler(s_server, &kSdListUri);
+    httpd_register_uri_handler(s_server, &kSdReadUri);
+    httpd_register_uri_handler(s_server, &kSdWriteUri);
     httpd_register_uri_handler(s_server, &kShotUri);
     httpd_register_uri_handler(s_server, &kDbgUri);
     httpd_register_uri_handler(s_server, &kDitherUri);
-    httpd_register_uri_handler(s_server, &kInvertUri);
-    httpd_register_uri_handler(s_server, &kVcomUri);
-    httpd_register_uri_handler(s_server, &kVcomTestUri);
-    httpd_register_uri_handler(s_server, &kRefreshUri);
     httpd_register_uri_handler(s_server, &kPageUri);
     httpd_register_uri_handler(s_server, &kCountdownUri);
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);
