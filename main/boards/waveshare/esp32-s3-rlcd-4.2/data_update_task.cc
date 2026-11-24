@@ -51,6 +51,11 @@ void CustomLcdDisplay::StartDataUpdateTask() {
     // 栈从 16KB 下调到 8KB，给音频/MQTT 留更多 SRAM 余量
     // 优先级保持较低，避免与语音收发实时链路抢占 CPU
     xTaskCreate(DataUpdateTask, "weather_ui_update", 8192, this, 2, &update_task_handle_);
+
+    // v12: 同时启动持续刷新任务（对齐微雪官方 U8G2 例程 74FPS 快速刷新）
+    // 深色背景下每 13ms 整帧重送，维持像素电荷，防止左上角 band 边界闪烁。
+    // 可用 /refresh?on=0 关闭、/refresh?ms=N 调节间隔。
+    StartRefreshTask();
 }
 
 void CustomLcdDisplay::DataUpdateTask(void *arg) {

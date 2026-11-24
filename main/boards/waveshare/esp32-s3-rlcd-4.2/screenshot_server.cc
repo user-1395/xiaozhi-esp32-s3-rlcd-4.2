@@ -526,6 +526,50 @@ static const httpd_uri_t kVcomTestUri = {
     .user_ctx = nullptr,
 };
 
+// v12: 持续刷新开关（对齐微雪官方 U8G2 例程 74FPS 快速刷新，深底不闪）。
+// GET /refresh?on=1|0&ms=13   on=1 开 / on=0 关 / ms=间隔(1~200)；无参数只报告状态。
+static esp_err_t RefreshHandler(httpd_req_t *req) {
+    if (!CheckAuth(req)) {
+        return ESP_OK;
+    }
+    if (s_display == nullptr) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
+    }
+    char query[96] = {0};
+    char onbuf[8] = {0};
+    char msbuf[8] = {0};
+    int on = -1;
+    int ms = -1;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "on", onbuf, sizeof(onbuf)) == ESP_OK) {
+            on = atoi(onbuf);
+        }
+        if (httpd_query_key_value(query, "ms", msbuf, sizeof(msbuf)) == ESP_OK) {
+            ms = atoi(msbuf);
+        }
+    }
+    if (on == 0 || on == 1) {
+        s_display->SetRefresh(on == 1, ms);
+    } else if (ms >= 1 && ms <= 200) {
+        s_display->SetRefresh(s_display->refreshEnabled(), ms);
+    }
+    char out[160];
+    int n = snprintf(out, sizeof(out),
+                     "refresh=%s interval=%dms (官方 74FPS≈13ms; on=1开 on=0关 ms=间隔)\n",
+                     s_display->refreshEnabled() ? "on" : "off",
+                     s_display->refreshIntervalMs());
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, out, n);
+}
+
+static const httpd_uri_t kRefreshUri = {
+    .uri = "/refresh",
+    .method = HTTP_GET,
+    .handler = RefreshHandler,
+    .user_ctx = nullptr,
+};
+
 static const httpd_uri_t kMusicPlayUri = {
     .uri = "/music_play",
     .method = HTTP_GET,
@@ -674,10 +718,16 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     }
     s_display = display;
 
+    // v12: 默认深色背景（深底白字），对齐微雪官方 U8G2 例程外观。
+    // 配合 StartRefreshTask 的持续整帧刷新，深色像素电荷持续维持不闪。
+    // 可用 /invert?on=0 切回浅色对比。
+    display->SetInversion(true);
+    ESP_LOGI(TAG, "默认切换为深色背景（深底白字）+ 持续刷新防闪");
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kShotPort;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 18;      // 调试端点已超过默认 8 个（含 v11 /vcom /vcomtest）
+    config.max_uri_handlers = 20;      // 调试端点已超过默认 8 个（含 v11 /vcom /vcomtest、v12 /refresh）
     config.stack_size = 12288;         // /weather_set 内同步跑一次天气请求；截图也需较大栈
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败（端口 %d 被占用？）", kShotPort);
@@ -692,6 +742,7 @@ bool ScreenshotServerStart(CustomLcdDisplay *display) {
     httpd_register_uri_handler(s_server, &kInvertUri);
     httpd_register_uri_handler(s_server, &kVcomUri);
     httpd_register_uri_handler(s_server, &kVcomTestUri);
+    httpd_register_uri_handler(s_server, &kRefreshUri);
     httpd_register_uri_handler(s_server, &kPageUri);
     httpd_register_uri_handler(s_server, &kCountdownUri);
     httpd_register_uri_handler(s_server, &kWeatherQueryUri);

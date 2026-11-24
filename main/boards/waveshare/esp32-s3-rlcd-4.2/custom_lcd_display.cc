@@ -229,6 +229,59 @@ uint8_t CustomLcdDisplay::vcomLevel() const
     return rlcd_ != nullptr ? rlcd_->vcom_level() : 0x11;
 }
 
+// ===== v12: 持续刷新任务（对齐微雪官方 U8G2 例程快速刷新）=====
+// 官方深色背景不闪：每 13ms 重送整帧，深色像素电荷持续维持。
+// 小智原本事件驱动静态刷新（画面不变跳过 SPI），深色像素电荷泄漏→左上角 band 边界闪。
+// 本任务周期性重送整帧。DisplayLockGuard=lvgl_port_lock，与 LVGL flush 任务互斥 SPI/显存。
+void CustomLcdDisplay::RefreshTask(void *arg)
+{
+    CustomLcdDisplay *self = (CustomLcdDisplay *)arg;
+    ESP_LOGI(TAG, "持续刷新任务启动，默认间隔 %d ms", self->refresh_interval_ms_.load());
+    while (self->refresh_running_.load()) {
+        const int interval = self->refresh_interval_ms_.load();
+        vTaskDelay(pdMS_TO_TICKS(interval));
+        if (!self->refresh_running_.load() || self->rlcd_ == nullptr) {
+            continue;
+        }
+        DisplayLockGuard lock(self);
+        if (!lock) {
+            continue;
+        }
+        PowerManager::ApbMaxGuard apb_guard;
+        PowerManager::NoLightSleepGuard sleep_guard;
+        self->rlcd_->RLCD_Display();   // 即使画面不变也整帧重送，维持像素电荷
+        self->stat_full_++;
+        self->stat_bytes_ += (uint64_t)self->rlcd_->display_len();
+    }
+    self->refresh_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void CustomLcdDisplay::StartRefreshTask()
+{
+    if (refresh_task_handle_ != nullptr) {
+        return;   // 已启动
+    }
+    refresh_running_.store(true);
+    // 低优先级(1) + 4KB 栈：只做加锁+整帧 SPI 重送，不碰 UI/网络
+    xTaskCreate(RefreshTask, "rlcd_auto_refresh", 4096, this, 1, &refresh_task_handle_);
+    ESP_LOGI(TAG, "持续刷新已启用：每 %d ms 整帧重送（深色防闪）", refresh_interval_ms_.load());
+}
+
+void CustomLcdDisplay::SetRefresh(bool enabled, int interval_ms)
+{
+    if (interval_ms >= 1 && interval_ms <= 200) {
+        refresh_interval_ms_.store(interval_ms);
+        ESP_LOGI(TAG, "持续刷新间隔调整为 %d ms", interval_ms);
+    }
+    if (enabled) {
+        StartRefreshTask();
+    } else {
+        refresh_running_.store(false);
+        ESP_LOGI(TAG, "持续刷新已关闭（恢复静态刷新，画面不变跳过 SPI）");
+    }
+}
+
 // 累积/合并脏区条带：间隙小于 kFlushMergeGap 的条带合并，条带过多则退化为整帧
 void CustomLcdDisplay::FlushAddRange(int x1, int x2)
 {
@@ -389,6 +442,10 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
 }
 
 CustomLcdDisplay::~CustomLcdDisplay() {
+    refresh_running_.store(false);
+    if (refresh_task_handle_) {
+        vTaskDelete(refresh_task_handle_);
+    }
     if (update_task_handle_) {
         vTaskDelete(update_task_handle_);
     }

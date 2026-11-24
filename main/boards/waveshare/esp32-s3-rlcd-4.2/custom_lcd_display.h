@@ -167,6 +167,16 @@ private:
 
     // 数据更新任务句柄
     TaskHandle_t update_task_handle_ = nullptr;
+
+    // ===== v12: 持续刷新任务（对齐微雪官方 U8G2 例程的 74FPS 快速刷新）=====
+    // 官方深色背景不闪的原因：每 13ms 重送整帧，像素电荷持续维持。
+    // 小智原本是事件驱动静态刷新（画面不变就跳过 SPI），深色像素电荷泄漏才闪。
+    // 本任务周期性重送整帧，持 DisplayLock（=lvgl_port_lock）与 LVGL flush 互斥。
+    TaskHandle_t refresh_task_handle_ = nullptr;
+    std::atomic<bool> refresh_running_{false};
+    std::atomic<int>  refresh_interval_ms_{13};   // 官方 ~74FPS ≈ 13ms/帧
+    static void RefreshTask(void *arg);
+    void StartRefreshTask();
     
     // 系统信息滚动标志（为 true 时暂停 DataUpdateTask 更新，避免锁竞争）
     std::atomic<bool> showing_system_info_{false};
@@ -224,6 +234,11 @@ public:
     // VCOM 电压/对比度 (0x00-0x1F)：持锁设置并强制整帧重送，用于运行时诊断闪烁。
     void SetVcom(uint8_t level);
     uint8_t vcomLevel() const;
+
+    // 持续刷新开关/间隔（/refresh 端点用）：true=周期性整帧重送，间隔 1~200ms。
+    void SetRefresh(bool enabled, int interval_ms = -1);
+    bool refreshEnabled() const { return refresh_running_.load(); }
+    int refreshIntervalMs() const { return refresh_interval_ms_.load(); }
 
     // 1-bit 二值化抖动模式：0=硬阈值(旧行为) 1=Bayer4x4 2=Bayer8x8(默认)
     void SetDitherMode(int mode);
